@@ -394,13 +394,21 @@ pub fn paragraphs_shape(id: u32, name: &str, placeholder: Option<(&str, u32)>, p
     )
 }
 
-/// A content slide: a title and a body placeholder with these bullets.
+/// A content slide: a title and a body placeholder with these bullets,
+/// each plain text (escaped). No bullets is one empty paragraph, as
+/// PowerPoint writes an empty placeholder.
 pub fn content_slide(title: &str, bullets: &[&str]) -> RawSlide {
+    let runs: Vec<String> = if bullets.is_empty() {
+        vec!["<a:endParaRPr/>".to_owned()]
+    } else {
+        bullets.iter().map(|b| format!("<a:r><a:t>{}</a:t></a:r>", escape(b))).collect()
+    };
+    let runs: Vec<&str> = runs.iter().map(String::as_str).collect();
     RawSlide::new(
         1,
         &[
             text_shape(2, "Title 1", Some(("title", 0)), title),
-            paragraphs_shape(3, "Content Placeholder 2", Some(("body", 1)), bullets),
+            paragraphs_shape(3, "Content Placeholder 2", Some(("body", 1)), &runs),
         ]
         .concat(),
     )

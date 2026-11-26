@@ -1,6 +1,9 @@
 //! The comparison on synthetic decks: slide alignment, shape pairing,
 //! paragraph changes, and the listing.
 
+// Decks a and b, changes c, and their sides read best short in these tests.
+#![allow(clippy::many_single_char_names)]
+
 use pptdif::diff::{self, AlignMode, Change, CompareOptions, Comparison, Filter, Kind, Side, Status};
 use pptdif::model::Presentation;
 use pptdif_fixtures::{RawDeck, RawSlide, content_slide, paragraphs_shape, picture, text_shape};
@@ -180,11 +183,25 @@ fn describe(c: &Change, swap: bool) -> String {
         (Status::OnlyOther, true) => Status::OnlyBase,
         (s, _) => s,
     };
-    let loc = |s: &Option<Side>| s.as_ref().map(|s| (s.slide, s.paragraph, s.text.clone()));
-    format!("{:?} {status:?} {:?} {:?}", c.kind, loc(base), loc(other))
+    let loc = |s: &Option<Side>| {
+        s.as_ref().map(|s| (s.slide, s.shape.as_ref().map(|r| (r.id, r.name.clone())), s.paragraph, s.text.clone()))
+    };
+    let props: Vec<String> = c
+        .properties
+        .iter()
+        .map(|p| {
+            if swap {
+                format!("{}:{}>{}", p.name, p.other, p.base)
+            } else {
+                format!("{}:{}>{}", p.name, p.base, p.other)
+            }
+        })
+        .collect();
+    format!("{:?} {status:?} {:?} {:?} {props:?}", c.kind, loc(base), loc(other))
 }
 
-/// Swapping the decks mirrors every change.
+/// Swapping the decks mirrors every change, and every slide pair's status
+/// and moved flag.
 fn assert_mirrors(a: &Presentation, b: &Presentation) {
     let (ab, ba) = (compare(a, b), compare(b, a));
     let mut forward: Vec<String> = changes(&ab).iter().map(|c| describe(c, false)).collect();
@@ -192,6 +209,25 @@ fn assert_mirrors(a: &Presentation, b: &Presentation) {
     forward.sort();
     backward.sort();
     assert_eq!(forward, backward);
+    let pairs = |c: &Comparison, swap: bool| {
+        let mut v: Vec<String> = c
+            .slides
+            .iter()
+            .map(|p| {
+                let (x, y) = (p.base.as_ref().map(|r| r.index), p.other.as_ref().map(|r| r.index));
+                let (x, y) = if swap { (y, x) } else { (x, y) };
+                let status = match (p.status, swap) {
+                    (Status::OnlyBase, true) => Status::OnlyOther,
+                    (Status::OnlyOther, true) => Status::OnlyBase,
+                    (s, _) => s,
+                };
+                format!("{x:?} {y:?} {status:?} {}", p.moved)
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(pairs(&ab, false), pairs(&ba, true));
 }
 
 #[test]
@@ -241,4 +277,96 @@ mod properties {
             assert_mirrors(&build(&a), &build(&b));
         }
     }
+}
+
+#[test]
+fn a_field_and_its_text_typed_in_differ() {
+    let slide = |p: &str| {
+        let footer = paragraphs_shape(4, "Slide Number", Some(("sldNum", 12)), &[p]);
+        RawSlide::new(1, &[text_shape(2, "Title 1", Some(("title", 0)), "Budget"), footer].concat())
+    };
+    let field = deck(vec![slide(r#"<a:fld id="{1}" type="slidenum"><a:t>3</a:t></a:fld>"#)]);
+    // Braces were once how a field compared; typed in, they are text.
+    let typed = deck(vec![slide("<a:r><a:t>{slidenum}</a:t></a:r>")]);
+    let c = compare(&field, &typed);
+    assert_eq!(changes(&c).len(), 1, "{:?}", changes(&c));
+}
+
+#[test]
+fn a_field_without_text_is_still_a_field() {
+    let empty = r#"<a:fld id="{1}" type="datetime1"/>"#;
+    let d = deck(vec![RawSlide::new(1, &paragraphs_shape(4, "Date", Some(("dt", 10)), &[empty]))]);
+    let runs = &d.slides[0].shapes[0].text.as_ref().unwrap()[0].runs;
+    assert_eq!(runs.len(), 1);
+    assert!(matches!(&runs[0], pptdif::model::Run::Field { kind, text } if kind == "datetime1" && text.is_empty()));
+}
+
+#[test]
+fn a_fields_paragraph_properties_do_not_set_the_level() {
+    let p = r#"<a:pPr lvl="2"/><a:fld id="{1}" type="slidenum"><a:pPr lvl="0"/><a:t>3</a:t></a:fld>"#;
+    let d = deck(vec![RawSlide::new(1, &paragraphs_shape(4, "N", None, &[p]))]);
+    assert_eq!(d.slides[0].shapes[0].text.as_ref().unwrap()[0].level, 2);
+}
+
+#[test]
+fn empty_shapes_do_not_pair_by_kind_alone() {
+    let blank = |id: u32, name: &str| {
+        format!(r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{name}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#)
+    };
+    let c = compare(&deck(vec![RawSlide::new(1, &blank(5, "Old"))]), &deck(vec![RawSlide::new(1, &blank(6, "New"))]));
+    let mut statuses: Vec<String> = changes(&c).iter().map(|c| format!("{:?}", c.status)).collect();
+    statuses.sort();
+    assert_eq!(statuses, ["OnlyBase", "OnlyOther"]);
+}
+
+#[test]
+fn blank_slides_pair_by_layout() {
+    let blank = || RawSlide::new(1, "");
+    let a = deck(vec![content_slide("Cover", &["x"]), blank(), blank()]);
+    assert!(changes(&compare(&a, &a)).is_empty());
+    let b = deck(vec![content_slide("Cover", &["x"]), blank(), blank(), blank()]);
+    let c = compare(&a, &b);
+    assert_eq!(changes(&c).len(), 1, "{:?}", changes(&c));
+}
+
+#[test]
+fn grown_paragraphs_pair_in_order() {
+    let a = deck(vec![content_slide("Plan", &["Pier", "Deck", "Rail"])]);
+    let b =
+        deck(vec![content_slide("Plan", &["Pier footings poured", "New item", "Deck boards laid", "Rail posts set"])]);
+    let c = compare(&a, &b);
+    let edits: Vec<(Option<usize>, Option<usize>)> = changes(&c)
+        .iter()
+        .filter(|c| c.status == Status::Changed)
+        .map(|c| (c.base.as_ref().and_then(|s| s.paragraph), c.other.as_ref().and_then(|s| s.paragraph)))
+        .collect();
+    assert_eq!(edits, [(Some(1), Some(1)), (Some(2), Some(3)), (Some(3), Some(4))]);
+}
+
+#[test]
+fn a_hidden_shape_is_a_shape_change() {
+    let shown = text_shape(5, "Note", None, "Draft");
+    let hidden = shown.replace(r#"name="Note"/>"#, r#"name="Note" hidden="1"/>"#);
+    let c = compare(&deck(vec![RawSlide::new(1, &shown)]), &deck(vec![RawSlide::new(1, &hidden)]));
+    assert_eq!(changes(&c)[0].properties[0].name, "hidden");
+}
+
+#[test]
+fn changed_paragraphs_carry_word_marks() {
+    let a = deck(vec![content_slide("Plan", &["Order the timber railings this week"])]);
+    let b = deck(vec![content_slide("Plan", &["Order the steel railings this week"])]);
+    let c = compare(&a, &b);
+    let marks = changes(&c)[0].marks.as_ref().expect("marks");
+    assert_eq!((marks.base.len(), marks.other.len()), (1, 1));
+    let (s, e) = marks.other[0];
+    assert_eq!(&"Order the steel railings this week"[s as usize..e as usize], "steel");
+}
+
+#[test]
+fn all_lists_unchanged_slides_whatever_the_kinds() {
+    let mut slides = five();
+    slides[1] = content_slide("Scope", &["Pier only"]);
+    let c = compare(&deck(five()), &deck(slides));
+    let listing = diff::listing(&c, &Filter { all: true, kinds: vec![Kind::Notes], ..Filter::default() });
+    assert_eq!(listing.slides.len(), 4);
 }

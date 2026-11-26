@@ -154,6 +154,11 @@ fn compare_reports_changes_in_the_envelope() {
 
     let same = pptdif(["compare", s(&base), s(&base)]);
     assert_eq!(envelope(&same)["result"]["listed"], 0);
+
+    // `--all` lists unchanged slide pairs in the text listing too.
+    let all = pptdif(["compare", s(&base), s(&base), "--all", "--format", "text"]);
+    let lines: Vec<&str> = all.stdout.lines().collect();
+    assert_eq!(&lines[1..3], ["p1\tslide\tsame\tslide 1 -> slide 1", "p2\tslide\tsame\tslide 2 -> slide 2"]);
 }
 
 #[test]
