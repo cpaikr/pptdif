@@ -6,7 +6,7 @@
       "id": 1,
       "prompt": "demo/demo-v1.pptx 랑 demo/demo-v2.pptx 뭐가 바뀌었는지 정리해 줘.",
       "hard_because": "Slides were reordered, removed, and added, so comparing slide n with slide n would flag almost everything; the moved note and the chart value are easy to miss among text edits.",
-      "expected_output": "Runs pptdif compare (text or JSON) and reports: the cover subtitle 'Planning team' → 'Planning and delivery teams'; on Progress, 'Deck framing started' → 'Deck framing finished' and a new bullet 'Lighting designed'; on Site notes the note moved right (x 72 → 288 pt); Budget (slide 4 → 5) Steel cost 80 → 95 in the table and the chart's Q2 spend 12 → 14; the Risks slide removed; Questions moved from slide 6 to 4; a Next steps slide added. Names base and other, quotes wording and figures from the tool."
+      "expected_output": "Runs pptdif compare (text or JSON) and reports: the cover subtitle 'Planning team' → 'Planning and delivery teams'; on Progress, 'Deck framing started' → 'Deck framing finished' and a new bullet 'Lighting designed'; on Site notes the note moved right (x 72 → 288 pt); Budget (slide 4 → 5) Steel cost 80 → 95 in the table and the chart's Q2 spend 12 → 14; the Risks slide removed; Questions moved from slide 6 to 4; a Next steps slide added. Names base and other, quotes wording and figures from the tool, and gives the Budget slide's position in both decks (4 and 5) although only Questions is marked moved."
     },
     {
       "id": 2,

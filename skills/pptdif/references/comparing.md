@@ -7,15 +7,22 @@ Start broad, then narrow:
 1. `pptdif compare BASE OTHER --format text` for an overview: the header
    line counts changed, removed, added, and moved slides, then each change
    is one line with its id, kind, status, where it is in each deck, and the
-   wording or properties on each side.
+   wording or properties on each side; deck-level changes, an `omitted`
+   line when `--limit` cut something, and `warning` lines come last. Slide
+   titles are in the JSON (`slides[].base.title`, `slides[].other.title`).
 2. `pptdif compare BASE OTHER --slide N --kind text,notes` (JSON) to work
    with one slide's wording. `--limit 0` lists everything; the default lists
    500 changes and `omitted` counts the rest by slide pair and kind.
-3. `pptdif text OTHER --slide N --format text` to read a slide's full text.
+3. `pptdif text OTHER --slide N --format text` to read a slide's full
+   text, including table rows (`cell | cell`) and chart series
+   (`name: category value, ...`), for the context of a change.
 4. `pptdif compare BASE OTHER --format html -o REPORT.html` when a person
-   will review the result. The report shows every change regardless of
-   `--limit` and never replaces a compared deck; `--force` replaces another
-   existing file. Add `--images` on Windows with PowerPoint installed to draw
+   will review the result. Name it after the decks
+   (`<base>-vs-<other>.html`) beside them unless the user says otherwise;
+   if that file exists, pick a new name rather than `--force` unless the
+   user wants it replaced. The report shows what `--slide` and `--kind`
+   select, every such change whatever `--limit` says, and never replaces a
+   compared deck. Add `--images` on Windows with PowerPoint installed to draw
    the changed slides as PowerPoint renders them; it takes about a minute,
    so use it when the person needs to see the slides, not by default.
 
@@ -27,7 +34,11 @@ that instead of matching by content.
 
 Each slide pair has an `id` (`p3`), a `status` (`same`, `changed`,
 `onlyBase`, `onlyOther`, `moved`; a moved slide may also carry edits), and
-the slide's index, id, and title on each side. Each change has a stable
+the slide's index, id, and title on each side. `moved` marks the fewest
+slides that, taken out, leave the rest in order: when one slide moves up,
+the slides it passed shift by one position but are not marked moved. Say a
+slide's position in each deck when it differs, whether or not it is marked
+moved. Each change has a stable
 `id` (`p3:text:s3.2:s3.2` = pair 3, shape id 3 paragraph 2 on both sides), a
 `kind`, a `status`, `base` and `other` sides naming the slide, shape (`id`,
 `name`, `placeholder`), paragraph or table cell, and text, and often
