@@ -546,8 +546,12 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
 /// any other unknown element: their text is not read.
 fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
     let mut paragraphs: Vec<Paragraph> = Vec::new();
-    // A field's text is the `a:t` inside its `a:fld`.
+    // A field's kind and whether it had text, while inside its `a:fld`.
     let mut field: Option<String> = None;
+    let mut field_text = false;
+    // The depth of the open `a:p`: its own `a:pPr` sits right below it; a
+    // field's `a:pPr` is deeper.
+    let mut paragraph_depth = 0usize;
     let mut depth = 1usize;
     loop {
         match parser.next()? {
@@ -556,9 +560,10 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                 "p" => {
                     budget.take()?;
                     depth += 1;
+                    paragraph_depth = depth;
                     paragraphs.push(Paragraph { level: 0, runs: Vec::new() });
                 }
-                "pPr" => {
+                "pPr" if depth == paragraph_depth => {
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
                         p.level = number(&e, "lvl").unwrap_or(0);
@@ -569,7 +574,10 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                     let text = parser.text_until_end(&[])?;
                     let Some(p) = paragraphs.last_mut() else { continue };
                     match &field {
-                        Some(kind) => p.runs.push(Run::Field { kind: kind.clone(), text }),
+                        Some(kind) => {
+                            field_text = true;
+                            p.runs.push(Run::Field { kind: kind.clone(), text });
+                        }
                         None => p.runs.push(Run::Text(text)),
                     }
                 }
@@ -582,12 +590,17 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                 "fld" => {
                     depth += 1;
                     field = Some(e.plain_attr("type").unwrap_or("field").to_owned());
+                    field_text = false;
                 }
                 _ => depth += 1,
             },
             Event::End(name) => {
-                if name == "fld" {
-                    field = None;
+                if name == "fld"
+                    && let Some(kind) = field.take()
+                    && !field_text
+                    && let Some(p) = paragraphs.last_mut()
+                {
+                    p.runs.push(Run::Field { kind, text: String::new() });
                 }
                 depth -= 1;
                 if depth == 0 {
