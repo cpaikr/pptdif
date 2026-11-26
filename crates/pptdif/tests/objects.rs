@@ -217,3 +217,131 @@ fn object_changes_mirror_when_the_decks_swap() {
     r.sort();
     assert_eq!(f, r);
 }
+
+#[test]
+fn sections_sharing_a_name_pair_in_order_with_distinct_ids() {
+    let slides = || (0..3).map(|i| content_slide(["One", "Two", "Three"][i], &["x"])).collect::<Vec<_>>();
+    let raw = [("S", &[0usize][..]), ("S", &[1][..]), ("S", &[2][..])]
+        .iter()
+        .fold(slides().into_iter().fold(RawDeck::new(), RawDeck::slide), |d, (n, s)| d.section(n, s));
+    let d = pptdif::read_bytes(raw.to_bytes()).unwrap();
+    assert!(compare(&d, &d).objects.is_empty());
+}
+
+fn chart_deck(xml: &str) -> Presentation {
+    deck(vec![one(&chart_frame(7, "Chart 6", "rIdC")).part("rIdC", "chart", "charts/chart1.xml", xml.as_bytes())])
+}
+
+fn chart_of(d: &Presentation) -> &pptdif::model::Chart {
+    d.slides[0].shapes[1].chart.as_ref().unwrap().data.as_ref().unwrap()
+}
+
+const C: &str = r#"xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart""#;
+
+#[test]
+fn a_linked_chart_title_reads_its_text_not_its_formula() {
+    let xml = format!(
+        r#"<c:chartSpace {C}><c:chart><c:title><c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title><c:plotArea><c:barChart/></c:plotArea></c:chart></c:chartSpace>"#
+    );
+    assert_eq!(chart_of(&chart_deck(&xml)).title.as_deref(), Some("Revenue"));
+}
+
+#[test]
+fn axis_titles_and_data_labels_do_not_rename_a_series() {
+    let label = r#"<c:dLbls><c:dLbl><c:idx val="0"/><c:tx><c:rich><a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>Label</a:t></a:r></a:p></c:rich></c:tx></c:dLbl></c:dLbls>"#;
+    let axis = r#"<c:valAx><c:title><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Axis</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title></c:valAx>"#;
+    let xml = format!(
+        r#"<c:chartSpace {C}><c:chart><c:plotArea><c:barChart><c:ser><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>S1</c:v></c:pt></c:strCache></c:strRef></c:tx>{label}<c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart>{axis}</c:plotArea></c:chart></c:chartSpace>"#
+    );
+    let d = chart_deck(&xml);
+    let series = &chart_of(&d).series;
+    assert_eq!((series.len(), series[0].name.as_deref()), (1, Some("S1")));
+    assert_eq!(series[0].values, [Some(1.0)]);
+}
+
+#[test]
+fn chart_padding_counts_against_the_record_budget() {
+    let xml = format!(
+        r#"<c:chartSpace {C}><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numRef><c:numCache><c:pt idx="5000"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    );
+    let raw = RawDeck::new().slide(one(&chart_frame(7, "Chart 6", "rIdC")).part(
+        "rIdC",
+        "chart",
+        "charts/chart1.xml",
+        xml.as_bytes(),
+    ));
+    let limits = pptdif::Limits { max_records: 1000, ..pptdif::Limits::default() };
+    assert_eq!(pptdif::read_bytes_with(raw.to_bytes(), &limits).unwrap_err().code, pptdif::ErrorCode::InvalidArchive);
+}
+
+#[test]
+fn multi_level_categories_join_their_levels() {
+    let xml = format!(
+        r#"<c:chartSpace {C}><c:chart><c:plotArea><c:barChart><c:ser><c:cat><c:multiLvlStrRef><c:multiLvlStrCache><c:lvl><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:lvl><c:lvl><c:pt idx="0"><c:v>2026</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    );
+    assert_eq!(chart_of(&chart_deck(&xml)).series[0].categories, ["Q1 / 2026"]);
+}
+
+#[test]
+fn a_moved_paragraph_still_compares_its_formatting() {
+    let p = |bold: &str| {
+        paragraphs_shape(
+            3,
+            "Body",
+            Some(("body", 1)),
+            &[
+                "<a:r><a:t>First line</a:t></a:r>",
+                &format!("<a:r>{bold}<a:t>Second line</a:t></a:r>"),
+                "<a:r><a:t>Third line</a:t></a:r>",
+            ],
+        )
+    };
+    let moved = paragraphs_shape(
+        3,
+        "Body",
+        Some(("body", 1)),
+        &[
+            "<a:r><a:rPr b=\"1\"/><a:t>Second line</a:t></a:r>",
+            "<a:r><a:t>First line</a:t></a:r>",
+            "<a:r><a:t>Third line</a:t></a:r>",
+        ],
+    );
+    let c = compare(&deck(vec![one(&p(""))]), &deck(vec![one(&moved)]));
+    assert_eq!(of(&c, Kind::Format).len(), 1, "{:?}", changes(&c));
+}
+
+#[test]
+fn a_renamed_shape_that_moved_back_is_one_shape_change() {
+    let b = |id: u32, name: &str, x: i64| placed_box(id, name, name, (x * INCH, 0, INCH, INCH), "");
+    let (one_, two, three) = (b(5, "One", 0), b(6, "Two", 2), b(7, "Three", 4));
+    let renamed = three.replace("name=\"Three\"", "name=\"Last\"");
+    let a = deck(vec![one(&[one_.clone(), two.clone(), three].concat())]);
+    let other = deck(vec![one(&[renamed, one_, two].concat())]);
+    let c = compare(&a, &other);
+    let shape = of(&c, Kind::Shape);
+    assert_eq!(shape.len(), 1, "{shape:?}");
+    let names: Vec<&str> = shape[0].properties.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["name", "zOrder"]);
+}
+
+#[test]
+fn moving_between_groups_of_one_name_is_a_group_change() {
+    let b1 = placed_box(5, "Box", "one", (0, 0, INCH, INCH), "");
+    let a = deck(vec![one(&[group(10, "Pair", &b1), group(11, "Pair", "")].concat())]);
+    let b = deck(vec![one(&[group(10, "Pair", ""), group(11, "Pair", &b1)].concat())]);
+    let c = compare(&a, &b);
+    let g = of(&c, Kind::Shape);
+    assert_eq!(g.len(), 1, "{g:?}");
+    assert_eq!(g[0].properties[0].name, "group");
+}
+
+#[test]
+fn a_ragged_table_too_large_to_compare_falls_back() {
+    let wide: Vec<&str> = vec!["h"; 1500];
+    let one_cell: &[&str] = &["x"];
+    let mut rows: Vec<&[&str]> = vec![&wide];
+    rows.extend(std::iter::repeat_n(one_cell, 1000));
+    let d = deck(vec![one(&table(6, "T", &rows))]);
+    let c = compare(&d, &d);
+    assert!(c.fell_back);
+}

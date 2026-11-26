@@ -302,17 +302,18 @@ fn leaves(slide: &Slide) -> Vec<&Shape> {
     slide.all_shapes().filter(|s| s.kind != ShapeKind::Group).collect()
 }
 
-/// For each of [`leaves`], the names of the groups holding it, outermost
-/// first, or `None` at the slide's top level.
-fn group_paths(slide: &Slide) -> Vec<Option<String>> {
-    fn walk(shapes: &[Shape], path: &mut Vec<String>, out: &mut Vec<Option<String>>) {
+/// For each of [`leaves`], the groups holding it, outermost first: their
+/// names joined (`None` at the slide's top level), and their ids.
+fn group_paths(slide: &Slide) -> Vec<(Option<String>, Vec<Option<u32>>)> {
+    fn walk<'a>(shapes: &'a [Shape], path: &mut Vec<&'a Shape>, out: &mut Vec<(Option<String>, Vec<Option<u32>>)>) {
         for shape in shapes {
             if shape.kind == ShapeKind::Group {
-                path.push(shape.name.clone());
+                path.push(shape);
                 walk(&shape.children, path, out);
                 path.pop();
             } else {
-                out.push((!path.is_empty()).then(|| path.join(" / ")));
+                let names: Vec<&str> = path.iter().map(|g| g.name.as_str()).collect();
+                out.push(((!names.is_empty()).then(|| names.join(" / ")), path.iter().map(|g| g.id).collect()));
             }
         }
     }
@@ -829,7 +830,33 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
         changes.extend(paragraph_changes(Kind::Text, (ta, ai, Some(&ra)), (tb, bi, Some(&rb)), work));
         changes.extend(objects::shape_changes(sa, (ai, &ra), sb, (bi, &rb), tolerance, work));
     }
-    changes.extend(objects::arrangement_changes(&la, &group_paths(a), ai, &lb, &group_paths(b), bi, &pairs));
+    // Z-order and group moves join the pair's shape change, one per shape.
+    for ((i, j), props) in objects::arrangement_properties(&group_paths(a), &group_paths(b), &pairs) {
+        let (ra, rb) = (shape_ref(la[i], i + 1), shape_ref(lb[j], j + 1));
+        let existing = changes.iter_mut().find(|c| {
+            c.kind == Kind::Shape
+                && c.status == Status::Changed
+                && c.base.as_ref().and_then(|s| s.shape.as_ref()).is_some_and(|s| s.position == ra.position)
+                && c.other.as_ref().and_then(|s| s.shape.as_ref()).is_some_and(|s| s.position == rb.position)
+        });
+        if let Some(c) = existing {
+            c.properties.extend(props);
+        } else {
+            {
+                let side = |slide, r: &ShapeRef| Side {
+                    slide,
+                    shape: Some(r.clone()),
+                    paragraph: None,
+                    text: None,
+                    row: None,
+                    column: None,
+                };
+                let mut c = Change::new(Kind::Shape, Status::Changed, Some(side(ai, &ra)), Some(side(bi, &rb)));
+                c.properties = props;
+                changes.push(c);
+            }
+        }
+    }
 
     let (na, nb) = (a.notes.as_deref().unwrap_or_default(), b.notes.as_deref().unwrap_or_default());
     changes.extend(paragraph_changes(Kind::Notes, (na, ai, None), (nb, bi, None), work));

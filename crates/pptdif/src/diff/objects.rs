@@ -101,7 +101,7 @@ pub(super) fn shape_changes(
         }
     }
     if let (Some(ta), Some(tb)) = (&sa.table, &sb.table) {
-        changes.extend(table_changes(ta, (ai, ra), tb, (bi, rb)));
+        changes.extend(table_changes(ta, (ai, ra), tb, (bi, rb), work));
     }
     if let (Some(ca), Some(cb)) =
         (sa.chart.as_ref().and_then(|c| c.data.as_ref()), sb.chart.as_ref().and_then(|c| c.data.as_ref()))
@@ -145,7 +145,8 @@ fn format_differences(a: &Format, b: &Format) -> Vec<Property> {
         .collect()
 }
 
-/// Formatting changes on paragraphs whose text did not change: the
+/// Formatting changes on paragraphs whose text did not change (moved or
+/// not): the
 /// paragraph's own (level, alignment, bullet), then each stretch of
 /// characters whose run formatting differs in the same way. A paragraph
 /// whose text changed reports the text change only.
@@ -158,7 +159,8 @@ fn text_format_changes(
 ) -> Vec<Change> {
     let mut changes = Vec::new();
     for (status, i, j) in diff_paragraphs(a, b, work) {
-        let (Status::Same, Some(i), Some(j)) = (status, i, j) else { continue };
+        // Unchanged text, in place or moved.
+        let (Status::Same | Status::Moved, Some(i), Some(j)) = (status, i, j) else { continue };
         let (pa, pb) = (&a[i], &b[j]);
         let at = |slide, r: &ShapeRef, n: usize, text: String| Side {
             paragraph: Some(n + 1),
@@ -217,7 +219,23 @@ fn columns(table: &Table) -> usize {
 /// Columns align first, by their cells' text with the header as label;
 /// rows then align by their cells in aligned columns, so an inserted
 /// column cannot break row matching.
-fn table_changes(ta: &Table, (ai, ra): (usize, &ShapeRef), tb: &Table, (bi, rb): (usize, &ShapeRef)) -> Vec<Change> {
+/// The most grid cells (rows times the widest row) a table comparison
+/// reads; a larger table, which a ragged hostile file can make from few
+/// records, is not compared cell by cell and the comparison falls back.
+const MAX_TABLE_CELLS: usize = 1_000_000;
+
+fn table_changes(
+    ta: &Table,
+    (ai, ra): (usize, &ShapeRef),
+    tb: &Table,
+    (bi, rb): (usize, &ShapeRef),
+    work: &mut Work,
+) -> Vec<Change> {
+    let cells = |t: &Table| t.rows.len().saturating_mul(columns(t));
+    if cells(ta) > MAX_TABLE_CELLS || cells(tb) > MAX_TABLE_CELLS {
+        work.fell_back = true;
+        return Vec::new();
+    }
     let column_item = |t: &Table, c: usize| {
         let mut tokens: Vec<u64> = (0..t.rows.len()).map(|r| hash(&normalize(&cell_text(t, r, c)))).collect();
         tokens.sort_unstable();
@@ -384,17 +402,15 @@ fn chart_changes(a: &Chart, (ai, ra): (usize, &ShapeRef), b: &Chart, (bi, rb): (
 // Z-order and groups
 
 /// Paired shapes outside the longest run that keeps its stacking order
-/// moved forward or back; a shape that changed groups names both.
-pub(super) fn arrangement_changes(
-    la: &[&Shape],
-    ga: &[Option<String>],
-    ai: usize,
-    lb: &[&Shape],
-    gb: &[Option<String>],
-    bi: usize,
+/// moved forward or back; a shape that changed groups names both. Returns
+/// the properties by shape pair, for the caller to add to that pair's
+/// shape change.
+pub(super) fn arrangement_properties(
+    ga: &[(Option<String>, Vec<Option<u32>>)],
+    gb: &[(Option<String>, Vec<Option<u32>>)],
     pairs: &[(usize, usize)],
-) -> Vec<Change> {
-    let mut changes = Vec::new();
+) -> Vec<((usize, usize), Vec<Property>)> {
+    let mut out = Vec::new();
     let order: Vec<usize> = pairs.iter().map(|p| p.1).collect();
     let in_order: HashSet<usize> = longest_increasing(&order).into_iter().collect();
     for (k, &(i, j)) in pairs.iter().enumerate() {
@@ -402,15 +418,16 @@ pub(super) fn arrangement_changes(
         if !in_order.contains(&k) {
             props.push(Property { name: "zOrder", base: json!(i + 1), other: json!(j + 1) });
         }
+        // Groups compare by their ids where written, so moving between two
+        // groups of one name still shows; the names are what is reported.
         if ga[i] != gb[j] {
-            props.push(Property { name: "group", base: opt(ga[i].as_deref()), other: opt(gb[j].as_deref()) });
+            props.push(Property { name: "group", base: opt(ga[i].0.as_deref()), other: opt(gb[j].0.as_deref()) });
         }
         if !props.is_empty() {
-            let (ra, rb) = (super::shape_ref(la[i], i + 1), super::shape_ref(lb[j], j + 1));
-            changes.push(changed(Kind::Shape, side(ai, &ra), side(bi, &rb), props));
+            out.push(((i, j), props));
         }
     }
-    changes
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -492,8 +509,10 @@ pub(super) fn comment_changes(a: &[Comment], ai: usize, b: &[Comment], bi: usize
 // ---------------------------------------------------------------------------
 // Sections
 
-/// Sections pair by name; a paired section whose slides are not the same
-/// slides (through the slide pairing) lists both.
+/// Sections pair by name, the k-th of a name with the k-th; a paired
+/// section whose slides are not the same slides (through the slide
+/// pairing) lists both. Ids carry the occurrence (`name#k`), so sections
+/// sharing a name keep distinct ids.
 pub(super) fn section_changes(
     base: &Presentation,
     other: &Presentation,
@@ -508,12 +527,24 @@ pub(super) fn section_changes(
         ids.iter().filter_map(|id| pos.get(id).copied()).collect()
     };
     let mut changes = Vec::new();
-    let named_b: HashMap<&str, usize> = other.sections.iter().enumerate().map(|(j, s)| (s.name.as_str(), j)).collect();
+    let occurrences = |deck: &Presentation| -> Vec<String> {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        deck.sections
+            .iter()
+            .map(|s| {
+                let k = seen.entry(s.name.as_str()).or_default();
+                *k += 1;
+                format!("{}#{k}", s.name)
+            })
+            .collect()
+    };
+    let (oa, ob) = (occurrences(base), occurrences(other));
+    let named_b: HashMap<&str, usize> = ob.iter().enumerate().map(|(j, n)| (n.as_str(), j)).collect();
     let mut used_b = HashSet::new();
-    for s in &base.sections {
-        let Some(&j) = named_b.get(s.name.as_str()).filter(|j| !used_b.contains(*j)) else {
+    for (s, key) in base.sections.iter().zip(&oa) {
+        let Some(&j) = named_b.get(key.as_str()) else {
             changes.push(ObjectChange {
-                id: format!("section:{}:-", s.name),
+                id: format!("section:{key}:-"),
                 kind: Kind::Section,
                 status: Status::OnlyBase,
                 base: Some(json!(s.name)),
@@ -530,7 +561,7 @@ pub(super) fn section_changes(
         if mapped != theirs.iter().map(|j| Some(*j)).collect::<Vec<_>>() {
             let one_based = |v: &[usize]| json!(v.iter().map(|x| x + 1).collect::<Vec<_>>());
             changes.push(ObjectChange {
-                id: format!("section:{}:{}", s.name, t.name),
+                id: format!("section:{key}:{key}"),
                 kind: Kind::Section,
                 status: Status::Changed,
                 base: Some(json!(s.name)),
@@ -540,9 +571,8 @@ pub(super) fn section_changes(
         }
     }
     for (j, t) in other.sections.iter().enumerate().filter(|(j, _)| !used_b.contains(j)) {
-        let _ = j;
         changes.push(ObjectChange {
-            id: format!("section:-:{}", t.name),
+            id: format!("section:-:{}", ob[j]),
             kind: Kind::Section,
             status: Status::OnlyOther,
             base: None,

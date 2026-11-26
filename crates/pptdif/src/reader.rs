@@ -50,7 +50,11 @@ pub(crate) struct Budget {
 
 impl Budget {
     pub(crate) fn take(&mut self) -> Result<(), Error> {
-        self.left = self.left.checked_sub(1).ok_or_else(|| {
+        self.take_n(1)
+    }
+
+    pub(crate) fn take_n(&mut self, n: usize) -> Result<(), Error> {
+        self.left = self.left.checked_sub(n).ok_or_else(|| {
             Error::new(ErrorCode::InvalidArchive, format!("the presentation holds more than {} records", self.limit))
         })?;
         Ok(())
