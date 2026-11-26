@@ -196,6 +196,22 @@ fn media_ink_and_macros_are_named_as_not_compared() {
 }
 
 #[test]
+fn media_on_any_shape_is_named() {
+    let sound = r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Chime"/><p:cNvSpPr/><p:nvPr><a:wavAudioFile r:embed="rIdW" name="chime"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#;
+    let deck = read_bytes(RawDeck::new().slide(RawSlide::new(1, sound)).to_bytes()).unwrap();
+    assert!(deck.slides[0].shapes[0].media);
+    assert!(deck.warnings[0].message.contains("1 video or audio clip"), "{}", deck.warnings[0].message);
+}
+
+#[test]
+fn a_master_listed_twice_is_read_once() {
+    let deck = RawDeck::new()
+        .slide(RawSlide::new(0, ""))
+        .presentation_xml(r#"<p:sldMasterIdLst><p:sldMasterId id="2147483650" r:id="rId1"/></p:sldMasterIdLst>"#);
+    assert_eq!(read_bytes(deck.to_bytes()).unwrap().masters.len(), 1);
+}
+
+#[test]
 fn an_empty_custom_show_list_defines_no_show() {
     let empty = RawDeck::new().slide(RawSlide::new(0, "")).presentation_xml("<p:custShowLst/>");
     assert!(read_bytes(empty.to_bytes()).unwrap().warnings.is_empty());
