@@ -15,14 +15,21 @@ enum Slot {
     Value,
 }
 
-/// The `c:v` texts of the cache element just started, by point index.
-fn read_points(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<(usize, String)>, Error> {
+/// The `c:v` texts of the cache element just started, by point index, and
+/// the point count it declares (`c:ptCount`), which counts trailing empty
+/// points too.
+fn read_points(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<(Vec<(usize, String)>, usize), Error> {
     let mut points = Vec::new();
+    let mut declared = 0usize;
     let mut index: Option<usize> = None;
     let mut depth = 1usize;
     loop {
         match parser.next()? {
             Event::Start(e) => match e.name.as_str() {
+                "ptCount" => {
+                    depth += 1;
+                    declared = e.plain_attr("val").and_then(|v| v.parse().ok()).unwrap_or(0);
+                }
                 "pt" => {
                     depth += 1;
                     index = e.plain_attr("idx").and_then(|v| v.parse().ok());
@@ -38,11 +45,11 @@ fn read_points(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<(usiz
             Event::End(_) => {
                 depth -= 1;
                 if depth == 0 {
-                    return Ok(points);
+                    return Ok((points, declared));
                 }
             }
             Event::Text(_) => {}
-            Event::Eof => return Ok(points),
+            Event::Eof => return Ok((points, declared)),
         }
     }
 }
@@ -50,8 +57,11 @@ fn read_points(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<(usiz
 /// Point indices are written by the file: every slot up to the highest is
 /// charged to the record budget, so a lone point at a far index costs what
 /// its padding does.
-fn place<T: Clone + Default>(points: Vec<(usize, T)>, budget: &mut Budget) -> Result<Vec<T>, Error> {
-    let len = points.iter().map(|p| p.0 + 1).max().unwrap_or(0);
+fn place<T: Clone + Default>(points: Vec<(usize, T)>, declared: usize, budget: &mut Budget) -> Result<Vec<T>, Error> {
+    let highest = points.iter().map(|p| p.0.checked_add(1)).try_fold(0usize, |m, n| n.map(|n| m.max(n)));
+    let len = highest
+        .ok_or_else(|| Error::new(crate::ErrorCode::InvalidArchive, "a chart point index is out of range"))?
+        .max(declared);
     budget.take_n(len.saturating_sub(points.len()))?;
     let mut out = vec![T::default(); len];
     for (i, v) in points {
@@ -105,20 +115,28 @@ pub(crate) fn read_chart(text: &str, part: &str, budget: &mut Budget) -> Result<
                         chart.series.push(Series { name: None, categories: Vec::new(), values: Vec::new() });
                     }
                     "tx" if in_series => slot = Some(Slot::Name),
+                    // A series name may be written as `c:tx/c:v`, with no cache.
+                    "v" if slot == Some(Slot::Name) => {
+                        depth -= 1;
+                        let name = parser.text_until_end(&[])?;
+                        if let Some(series) = chart.series.last_mut() {
+                            series.name = Some(name);
+                        }
+                    }
                     "cat" | "xVal" if in_series => slot = Some(Slot::Category),
                     "val" | "yVal" if in_series => slot = Some(Slot::Value),
                     "strCache" | "numCache" | "strLit" | "numLit" | "multiLvlStrCache" if slot.is_some() => {
                         depth -= 1;
                         let multi = e.name == "multiLvlStrCache";
-                        let points = read_points(&mut parser, budget)?;
+                        let (points, declared) = read_points(&mut parser, budget)?;
                         let points = if multi { join_levels(points) } else { points };
                         let Some(series) = chart.series.last_mut() else { continue };
                         match slot {
                             Some(Slot::Name) => series.name = points.into_iter().next().map(|p| p.1),
-                            Some(Slot::Category) => series.categories = place(points, budget)?,
+                            Some(Slot::Category) => series.categories = place(points, declared, budget)?,
                             Some(Slot::Value) => {
                                 let values = points.into_iter().map(|(i, v)| (i, v.trim().parse::<f64>().ok()));
-                                series.values = place(values.collect(), budget)?;
+                                series.values = place(values.collect(), declared, budget)?;
                             }
                             None => {}
                         }
