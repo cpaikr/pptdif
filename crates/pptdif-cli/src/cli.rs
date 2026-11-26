@@ -46,6 +46,14 @@ pub enum Format {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompareFormat {
+    Json,
+    Text,
+    /// A self-contained side-by-side report; needs -o.
+    Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Kind {
     Slide,
     Shape,
@@ -118,6 +126,8 @@ Examples:
   pptdif compare v1.pptx v2.pptx
   pptdif compare v1.pptx v2.pptx --kind text,notes --format text
   pptdif compare v1.pptx v2.pptx --slide 4 --limit 0
+  pptdif compare v1.pptx v2.pptx --format html -o report.html
+  pptdif compare v1.pptx v2.pptx --format html -o report.html --images
 
 Reading the result:
   slides lists slide pairs (id p<n>) with a status: same, changed, onlyBase,
@@ -163,8 +173,20 @@ Reading the result:
         tolerance: f64,
         #[arg(long, value_enum, default_value_t = Align::Content)]
         align: Align,
-        #[arg(long, value_enum, default_value_t = Format::Json)]
-        format: Format,
+        #[arg(long, value_enum, default_value_t = CompareFormat::Json)]
+        format: CompareFormat,
+        /// Write the result here (required for html); stdout then carries a
+        /// summary envelope.
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+        /// Replace an existing output file (never a compared deck).
+        #[arg(long)]
+        force: bool,
+        /// In the HTML report, draw changed slides as PowerPoint renders
+        /// them (Windows with PowerPoint only; otherwise schematic, with a
+        /// warning).
+        #[arg(long)]
+        images: bool,
     },
 }
 

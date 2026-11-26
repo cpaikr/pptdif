@@ -178,6 +178,38 @@ fn text_lists_paragraphs_by_shape() {
 }
 
 #[test]
+fn the_html_report_goes_to_a_file_and_never_over_a_deck() {
+    let work = Work::new();
+    let base = work.basic();
+    let edited = pptdif_fixtures::basic().slide(pptdif_fixtures::content_slide("Next steps", &["Order railings"]));
+    let other = work.file("edited.pptx", &edited.to_bytes());
+    let report = work.0.join("report.html");
+
+    let missing = pptdif(["compare", s(&base), s(&other), "--format", "html"]);
+    assert_eq!((missing.code, envelope(&missing)["error"]["code"].clone()), (1, Value::from("invalid_argument")));
+
+    let run = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    let env = envelope(&run);
+    assert_eq!(env["result"]["summary"]["slidesOnlyOther"], 1);
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.starts_with("<!doctype html>") && html.contains("Next steps"));
+
+    // An existing file needs --force; a compared deck is never replaced.
+    let again = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]);
+    assert_eq!(envelope(&again)["error"]["code"], "output_exists");
+    let forced = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--force"]);
+    assert_eq!(forced.code, 0);
+    let deck_before = std::fs::read(&other).unwrap();
+    let over = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&other), "--force"]);
+    assert_eq!(envelope(&over)["error"]["code"], "output_exists");
+    assert_eq!(std::fs::read(&other).unwrap(), deck_before);
+
+    let images = pptdif(["compare", s(&base), s(&other), "--images"]);
+    assert_eq!(envelope(&images)["error"]["code"], "invalid_argument");
+}
+
+#[test]
 fn failures_carry_a_stable_code() {
     let work = Work::new();
     let missing = work.0.join("missing.pptx");

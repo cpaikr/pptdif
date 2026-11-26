@@ -6,11 +6,12 @@ matched by content, so an inserted or reordered slide is one change, not
 every slide after it. Agents read its JSON; people will read its
 side-by-side HTML report. It needs no PowerPoint.
 
-**Status:** M0 to M3 are done: `inspect`, `text`, and `compare` over
-slides, shapes, text, notes, geometry, formatting (inherited through
-layouts, masters, and themes, and checked against PowerPoint), tables,
-pictures, charts, comments, sections, layouts, masters, and themes. The
-HTML report (M4) is next. See [PLAN.md](PLAN.md).
+**Status:** M0 to M4 are done: `inspect`, `text`, and `compare` (JSON,
+text, and a self-contained HTML report) over slides, shapes, text, notes,
+geometry, formatting (inherited through layouts, masters, and themes, and
+checked against PowerPoint), tables, pictures, charts, comments, sections,
+layouts, masters, and themes. The agent skill and release (M5) are next.
+See [PLAN.md](PLAN.md).
 
 ## Commands
 
@@ -39,6 +40,12 @@ HTML report (M4) is next. See [PLAN.md](PLAN.md).
   master, theme, and default style; a slide reports them only where it
   writes something different, and a changed layout, master, or theme is
   one change under `objects`.
+  `--format html -o FILE` writes a self-contained report: each slide pair
+  side by side with changed shapes outlined, the changes listed under it
+  with changed words marked, and next and previous navigation. Slides are
+  drawn schematically; `--images` has PowerPoint (Windows) render the
+  changed slides instead, which takes about a minute. The report never
+  replaces a compared deck, and replaces another file only with `--force`.
 
 All accept `--format text`. Run `pptdif <command> --help` for details.
 

@@ -27,6 +27,8 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
     model;
   - [views.rs](crates/pptdif/src/views.rs): the `inspect` and `text`
     results;
+  - [html.rs](crates/pptdif/src/html.rs): the self-contained HTML report,
+    drawn from a comparison and the two decks, with optional slide images;
   - [align.rs](crates/pptdif/src/align.rs): sequence alignment (anchors on
     unique content, similarity in the gaps, moves), for slides and
     paragraphs;
@@ -49,7 +51,13 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   xldif").
 - [`crates/pptdif-cli`](crates/pptdif-cli/src/main.rs) parses arguments
   (clap), runs one command, and writes one stdout document
-  ([envelope.rs](crates/pptdif-cli/src/envelope.rs)).
+  ([envelope.rs](crates/pptdif-cli/src/envelope.rs)). It also owns the one
+  place pptdif starts another program
+  ([powerpoint.rs](crates/pptdif-cli/src/powerpoint.rs)): for `--images`, a
+  hidden PowerPoint opens both decks read-only in one session and exports
+  the changed slides as PNG into a scratch folder removed before the
+  command returns. PowerPoint draws; it never reads a deck for the
+  comparison.
 - [`crates/pptdif-fixtures`](crates/pptdif-fixtures/src/lib.rs) assembles
   synthetic decks from hand-written XML parts (and image and chart parts)
   for tests. No shipped crate depends on it.
@@ -58,7 +66,12 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
 
 ## Invariants
 
-- **No writes to inputs.** pptdif only reads presentations.
+- **No writes to inputs.** pptdif only reads presentations. A report
+  written with `-o` never replaces a compared deck, even with `--force`.
+- **One pairing.** The HTML report draws the slide pairs and changes the
+  comparison made; it never pairs anything again, so it cannot disagree
+  with the JSON. It fetches nothing: styles, script, and slide images are
+  inline.
 - **Bounds.** File size, member count, each member's decompressed size
   (measured while reading), total decompressed size, XML depth, and the
   number of slides, shapes, and comments are capped
@@ -139,6 +152,14 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd` and
   covers placeholders inheriting geometry, size, and theme fonts; text
   boxes taking the default style; layout, master, and theme changes
   reported once; and slide overrides.
+- [`crates/pptdif/tests/report.rs`](crates/pptdif/tests/report.rs) checks
+  the report is one self-contained document holding every pair and change,
+  escaped, with changed words marked and images under the outlines; the
+  CLI tests cover `-o`, `--force`, and never replacing a deck. The report
+  was checked in a browser on the demo pair
+  (`cargo run -p pptdif-fixtures --example write_demo -- DIR`) and on an
+  edited copy of the PowerPoint fixture with `--images`, including at
+  phone width.
 - [`scripts/format_parity.py`](scripts/format_parity.py) compares the
   resolved geometry and font size, bold, name, and alignment with
   PowerPoint's own (COM) on the PowerPoint-saved fixture and the private

@@ -112,6 +112,18 @@ def cli_smoke() -> None:
         env = {}
     if bad.returncode != 2 or env.get("error", {}).get("code") != "invalid_invocation":
         fail("smoke: invalid invocation is not a JSON failure with exit 2")
+    # The HTML report of the PowerPoint-saved deck renders self-contained.
+    deck = next(iter(sorted(SAVED.glob("*.pptx"))), None)
+    if deck is not None:
+        report = TARGET / "pptdif-smoke-report.html"
+        run = subprocess.run(
+            [str(EXE), "compare", str(deck), str(deck), "--format", "html", "-o", str(report), "--force"],
+            capture_output=True,
+        )
+        html = report.read_text(encoding="utf-8") if report.is_file() else ""
+        if run.returncode != 0 or not html.startswith("<!doctype html>") or re.search(r"(src|href)=\"https?:", html):
+            fail("smoke: the HTML report did not render self-contained")
+        report.unlink(missing_ok=True)
     if len(errors) == before:
         print("ok   cli smoke")
 
