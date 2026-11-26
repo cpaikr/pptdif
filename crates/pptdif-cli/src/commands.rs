@@ -9,7 +9,7 @@ use pptdif::views::{self, Inspection, TextListing};
 use pptdif::{Error, ErrorCode};
 use serde_json::Value;
 
-use crate::cli::{Align, Command, Format, Kind};
+use crate::cli::{Align, Command, CompareFormat, Format, Kind};
 use crate::envelope::{Failure, Warning};
 
 pub enum Output {
@@ -46,7 +46,18 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 Format::Text => Output::Text(text_text(&listing, &warnings)),
             })
         }
-        Command::Compare { base, other, slide, kind, limit, all, tolerance, align, format } => {
+        Command::Compare { base, other, slide, kind, limit, all, tolerance, align, format, output, force, images } => {
+            if format == CompareFormat::Html && output.is_none() {
+                return Err(Error::new(ErrorCode::InvalidArgument, "--format html needs -o FILE")
+                    .with_hint("for example: pptdif compare a.pptx b.pptx --format html -o report.html")
+                    .into());
+            }
+            if images && format != CompareFormat::Html {
+                return Err(Error::new(ErrorCode::InvalidArgument, "--images applies to --format html only").into());
+            }
+            if let Some(path) = &output {
+                check_output(path, &[&base, &other], force)?;
+            }
             if !(tolerance >= 0.0 && tolerance.is_finite()) {
                 return Err(
                     Error::new(ErrorCode::InvalidArgument, "--tolerance must be a finite number of 0 or more").into()
@@ -67,10 +78,10 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             let filter = Filter { slide, kinds: kind.into_iter().map(kind_of).collect(), limit, all };
             let listing = diff::listing(&comparison, &filter);
             let mut warnings = Vec::new();
-            for (label, deck) in [(&fa, a), (&fb, b)] {
+            for (label, deck) in [(&fa, &a), (&fb, &b)] {
                 warnings.extend(
                     deck.warnings
-                        .into_iter()
+                        .iter()
                         .map(|w| Warning { code: w.code.to_owned(), message: format!("{label}: {}", w.message) }),
                 );
             }
@@ -82,12 +93,88 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                         .to_owned(),
                 });
             }
-            Ok(match format {
-                Format::Json => Output::Json { result: json(&listing), warnings },
-                Format::Text => Output::Text(compare_text(&listing, &warnings)),
-            })
+            let document = match format {
+                CompareFormat::Json => Output::Json { result: json(&listing), warnings: warnings.clone() },
+                CompareFormat::Text => Output::Text(compare_text(&listing, &warnings)),
+                CompareFormat::Html => {
+                    let rendered = if images {
+                        crate::powerpoint::slide_images(&base, &other, &comparison, &a, &b)
+                    } else {
+                        Ok(pptdif::html::Images::default())
+                    };
+                    let rendered = match rendered {
+                        Ok(set) => {
+                            if images {
+                                warnings.push(Warning {
+                                    code: "rendered_by_powerpoint".to_owned(),
+                                    message: "changed slides are drawn as PowerPoint renders them".to_owned(),
+                                });
+                            }
+                            Some(set)
+                        }
+                        Err(why) => {
+                            warnings.push(Warning {
+                                code: "images_unavailable".to_owned(),
+                                message: format!("slides are drawn schematically: {why}"),
+                            });
+                            None
+                        }
+                    };
+                    let pairs: Vec<(String, String)> =
+                        warnings.iter().map(|w| (w.code.clone(), w.message.clone())).collect();
+                    let report = pptdif::html::Report { warnings: &pairs, images: rendered.as_ref() };
+                    // The report shows what --slide and --kind select, and
+                    // every such change whatever --limit says.
+                    let shown = diff::listing(
+                        &comparison,
+                        &Filter { slide, kinds: filter.kinds.clone(), limit: 0, all: filter.kinds.is_empty() },
+                    );
+                    let selected = pptdif::diff::Comparison {
+                        base: comparison.base.clone(),
+                        other: comparison.other.clone(),
+                        slides: shown.slides,
+                        objects: shown.objects,
+                        fell_back: comparison.fell_back,
+                    };
+                    Output::Text(pptdif::html::render(&selected, &a, &b, &report))
+                }
+            };
+            let Some(path) = output else { return Ok(document) };
+            let (text, warnings) = match document {
+                Output::Text(text) => (text, warnings),
+                Output::Json { result, .. } => {
+                    let mut text = serde_json::to_string_pretty(&result).expect("JSON values always serialize");
+                    text.push('\n');
+                    (text, warnings)
+                }
+            };
+            write_output(&path, &text, force, &[&base, &other])?;
+            let result = serde_json::json!({
+                "output": path.display().to_string(),
+                "summary": listing.summary,
+                "listed": listing.listed,
+            });
+            Ok(Output::Json { result, warnings })
         }
     }
+}
+
+/// An output path must not be a compared deck (even with `--force`) and
+/// must not exist unless `--force` says to replace it. "The same deck" is
+/// the same file, by identity: a symbolic or hard link to a deck is the
+/// deck.
+fn check_output(path: &Path, inputs: &[&std::path::PathBuf], force: bool) -> Result<(), Failure> {
+    if inputs.iter().any(|i| same_file::is_same_file(path, i).unwrap_or(false)) {
+        return Err(Error::new(ErrorCode::OutputExists, format!("{} is a compared deck", path.display()))
+            .with_hint("choose another output file; a compared deck is never replaced")
+            .into());
+    }
+    if path.exists() && !force {
+        return Err(Error::new(ErrorCode::OutputExists, format!("{} already exists", path.display()))
+            .with_hint("pass --force to replace it")
+            .into());
+    }
+    Ok(())
 }
 
 const fn kind_of(kind: Kind) -> diff::Kind {
@@ -303,4 +390,28 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// Writes the document: without `--force` the file must not exist (checked
+/// as it is created, so nothing created meanwhile is replaced); with it,
+/// the file is replaced, after making sure once more it is not a deck.
+fn write_output(path: &Path, text: &str, force: bool, inputs: &[&std::path::PathBuf]) -> Result<(), Failure> {
+    use std::io::Write as _;
+    let io =
+        |e: std::io::Error| Failure::from(Error::new(ErrorCode::IoError, format!("writing {}: {e}", path.display())));
+    if force {
+        check_output(path, inputs, true)?;
+        return std::fs::write(path, text).map_err(io);
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Failure::from(
+                Error::new(ErrorCode::OutputExists, format!("{} already exists", path.display()))
+                    .with_hint("pass --force to replace it"),
+            )
+        } else {
+            io(e)
+        }
+    })?;
+    file.write_all(text.as_bytes()).map_err(io)
 }

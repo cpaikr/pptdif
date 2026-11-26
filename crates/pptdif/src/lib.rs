@@ -9,6 +9,7 @@ pub mod align;
 mod chart;
 pub mod diff;
 mod error;
+pub mod html;
 mod inherit;
 pub mod model;
 mod package;

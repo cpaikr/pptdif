@@ -34,7 +34,13 @@ Status:
   against PowerPoint on the fixture (124 properties agree); layouts,
   masters, and themes compare once, and slides report inherited values
   only where they write something different.
-- Next action: M4, the HTML report ([TODO.md](TODO.md)).
+- M4 is done: `compare --format html -o FILE` writes the self-contained
+  report (slide pairs side by side, changed shapes outlined, changes with
+  word marks, navigation, "changes only", phone layout); `--images` has
+  PowerPoint render the changed slides (one PowerPoint session for both
+  decks: about 50 seconds, most of it PowerPoint starting).
+- Next action: M5, the agent skill and the release workflow
+  ([TODO.md](TODO.md)).
 
 ## Decisions
 

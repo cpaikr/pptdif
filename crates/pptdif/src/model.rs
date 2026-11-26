@@ -153,6 +153,9 @@ pub struct Geometry {
     pub rotation: i64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// A group's child frame (`chOff`, `chExt`): the coordinates its
+    /// members' geometry is written in, mapped onto `x, y, cx, cy`.
+    pub child: Option<(i64, i64, i64, i64)>,
 }
 
 /// A picture's image.

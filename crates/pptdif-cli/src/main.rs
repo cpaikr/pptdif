@@ -6,6 +6,7 @@
 mod cli;
 mod commands;
 mod envelope;
+mod powerpoint;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;

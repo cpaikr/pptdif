@@ -843,6 +843,14 @@ fn read_xfrm(parser: &mut Parser<'_>, e: &Element) -> Result<Geometry, Error> {
                     "ext" if depth == 2 => {
                         (g.cx, g.cy) = (number(&c, "cx").unwrap_or(0), number(&c, "cy").unwrap_or(0));
                     }
+                    "chOff" if depth == 2 => {
+                        let (_, _, ext_x, ext_y) = g.child.unwrap_or_default();
+                        g.child = Some((number(&c, "x").unwrap_or(0), number(&c, "y").unwrap_or(0), ext_x, ext_y));
+                    }
+                    "chExt" if depth == 2 => {
+                        let (off_x, off_y, _, _) = g.child.unwrap_or_default();
+                        g.child = Some((off_x, off_y, number(&c, "cx").unwrap_or(0), number(&c, "cy").unwrap_or(0)));
+                    }
                     _ => {}
                 }
             }
