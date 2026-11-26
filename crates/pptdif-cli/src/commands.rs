@@ -263,7 +263,7 @@ fn compare_text(listing: &Listing, warnings: &[Warning]) -> String {
         }
     }
     for o in &listing.objects {
-        let mut line = format!("{}\t{}\t{:?}", o.id, o.kind.as_str(), o.status);
+        let mut line = format!("{}\t{}\t{:?}", escape(&o.id), o.kind.as_str(), o.status);
         for p in &o.properties {
             let _ = write!(line, "\t{}: {} => {}", p.name, escape(&p.base.to_string()), escape(&p.other.to_string()));
         }

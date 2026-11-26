@@ -28,7 +28,8 @@ the HTML report (M4) are next. See [PLAN.md](PLAN.md).
   one change. Each change has a stable id and both sides' slide, shape,
   paragraph, and text. Fields (slide numbers, dates) compare by kind, so
   renumbered footers are not changes. Beyond text it reports geometry
-  (beyond a tolerance, half a point by default), formatting as written
+  (beyond a tolerance, half a point by default; a placeholder that writes
+  no position of its own is not compared until inheritance is resolved), formatting as written
   (runs and paragraphs of unchanged text, a shape's outline, fill, and
   line), z-order and grouping, tables (columns and rows aligned, then
   cells), pictures by image content, charts' cached series, comments with

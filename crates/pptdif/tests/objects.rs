@@ -345,3 +345,120 @@ fn a_ragged_table_too_large_to_compare_falls_back() {
     let c = compare(&d, &d);
     assert!(c.fell_back);
 }
+
+#[test]
+fn a_group_moved_as_a_unit_is_a_geometry_change() {
+    let member = placed_box(5, "Box", "one", (0, 0, INCH, INCH), "");
+    let at = |x: i64| {
+        format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9" name="Pair"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="{x}" y="0"/><a:ext cx="{INCH}" cy="{INCH}"/><a:chOff x="0" y="0"/><a:chExt cx="{INCH}" cy="{INCH}"/></a:xfrm></p:grpSpPr>{member}</p:grpSp>"#
+        )
+    };
+    let c = compare(&deck(vec![one(&at(0))]), &deck(vec![one(&at(2 * INCH))]));
+    let g = of(&c, Kind::Geometry);
+    assert_eq!(g.len(), 1, "{:?}", changes(&c));
+    assert_eq!(g[0].base.as_ref().unwrap().shape.as_ref().unwrap().name, "Pair");
+}
+
+#[test]
+fn linked_pictures_compare_by_their_target() {
+    let rels = |url: &str| {
+        RawSlide::new(1, &picture_of(4, "Photo", "rIdL").replace(r#"r:embed="rIdL""#, r#"r:link="rIdL""#))
+            .external("rIdL", "image", url)
+    };
+    let a = deck(vec![rels("http://example.com/a.png")]);
+    let b = deck(vec![rels("http://example.com/b.png")]);
+    let c = compare(&a, &b);
+    assert_eq!(of(&c, Kind::Picture).len(), 1, "{:?}", changes(&c));
+    assert!(changes(&compare(&a, &a)).is_empty());
+}
+
+#[test]
+fn merged_cells_moved_rows_and_cell_formatting_are_table_changes() {
+    let base: &[&[&str]] = &[&["Item", "Cost"], &["Timber", "120"], &["Steel", "80"], &["Glass", "60"]];
+    let moved: &[&[&str]] = &[&["Item", "Cost"], &["Glass", "60"], &["Timber", "120"], &["Steel", "80"]];
+    let t = |rows: &[&[&str]]| deck(vec![one(&table(6, "T", rows))]);
+    let c = compare(&t(base), &t(moved));
+    let m: Vec<&Change> = of(&c, Kind::Table).into_iter().filter(|c| c.status == Status::Moved).collect();
+    assert_eq!(m.len(), 1, "{:?}", changes(&c));
+
+    let merged =
+        table(6, "T", base).replacen("<a:tc>", r#"<a:tc hMerge="1">"#, 2).replacen(r#"<a:tc hMerge="1">"#, "<a:tc>", 1);
+    let c = compare(&t(base), &deck(vec![one(&merged)]));
+    let props: Vec<&str> = of(&c, Kind::Table).iter().flat_map(|c| c.properties.iter().map(|p| p.name)).collect();
+    assert_eq!(props, ["merged"], "{:?}", changes(&c));
+
+    let bold = table(6, "T", base).replacen("<a:r><a:t>Timber", r#"<a:r><a:rPr b="1"/><a:t>Timber"#, 1);
+    let c = compare(&t(base), &deck(vec![one(&bold)]));
+    let f = of(&c, Kind::Table);
+    assert_eq!(f.len(), 1, "{:?}", changes(&c));
+    assert_eq!((f[0].properties[0].name, f[0].base.as_ref().unwrap().row), ("bold", Some(2)));
+}
+
+#[test]
+fn a_changed_freeform_path_is_an_outline_change() {
+    let free = |x: i64| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Free"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="{x}" y="100"/></a:lnTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp>"#
+        )
+    };
+    let c = compare(&deck(vec![one(&free(50))]), &deck(vec![one(&free(80))]));
+    let f = of(&c, Kind::Format);
+    assert_eq!((f.len(), f[0].properties[0].name), (1, "outline"));
+}
+
+#[test]
+fn series_names_written_directly_and_series_order_are_read() {
+    let ser = |name: &str| {
+        format!(
+            r#"<c:ser><c:tx><c:v>{name}</c:v></c:tx><c:val><c:numRef><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>"#
+        )
+    };
+    let xml = |names: &[&str]| {
+        let body: String = names.iter().map(|n| ser(n)).collect();
+        format!(
+            "<c:chartSpace {C}><c:chart><c:plotArea><c:barChart>{body}</c:barChart></c:plotArea></c:chart></c:chartSpace>"
+        )
+    };
+    let a = chart_deck(&xml(&["North", "South", "East"]));
+    let s = &chart_of(&a).series;
+    assert_eq!(s[0].name.as_deref(), Some("North"));
+    // `ptCount` counts a trailing empty point.
+    assert_eq!(s[0].values, [Some(1.0), None]);
+    let b = chart_deck(&xml(&["East", "North", "South"]));
+    let c = compare(&a, &b);
+    let order: Vec<&str> = of(&c, Kind::Chart).iter().flat_map(|c| c.properties.iter().map(|p| p.name)).collect();
+    assert_eq!(order, ["order"], "{:?}", changes(&c));
+}
+
+#[test]
+fn paragraph_spacing_and_indentation_are_formatting() {
+    let p = |attrs: &str, inner: &str| {
+        paragraphs_shape(
+            3,
+            "Body",
+            Some(("body", 1)),
+            &[&format!("<a:pPr{attrs}>{inner}</a:pPr><a:r><a:t>Phase one</a:t></a:r>")],
+        )
+    };
+    let a = deck(vec![one(&p("", ""))]);
+    let b = deck(vec![one(&p(r#" marL="457200""#, r#"<a:spcAft><a:spcPts val="600"/></a:spcAft>"#))]);
+    let names: Vec<&str> =
+        of(&compare(&a, &b), Kind::Format).iter().flat_map(|c| c.properties.iter().map(|p| p.name)).collect();
+    assert_eq!(names, ["marginLeft", "spaceAfter"]);
+}
+
+#[test]
+fn deck_level_changes_share_the_limit() {
+    let slides = || (0..3).map(|i| content_slide(["One", "Two", "Three"][i], &["x"])).collect::<Vec<_>>();
+    let build = |sections: &[(&str, &[usize])]| {
+        let raw = sections
+            .iter()
+            .fold(slides().into_iter().fold(RawDeck::new(), RawDeck::slide), |d, (n, s)| d.section(n, s));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    let c = compare(&build(&[("A", &[0]), ("B", &[1]), ("C", &[2])]), &build(&[("X", &[0]), ("Y", &[1]), ("Z", &[2])]));
+    let listing = diff::listing(&c, &diff::Filter { limit: 2, ..diff::Filter::default() });
+    assert_eq!((listing.listed, listing.objects.len()), (2, 2));
+    assert_eq!(listing.omitted["objects"]["section"], 4);
+}

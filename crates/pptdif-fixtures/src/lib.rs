@@ -41,6 +41,8 @@ pub struct RawSlide {
     /// Extra parts this slide refers to: relationship id, kind, part name
     /// under `ppt/`, and bytes.
     parts: Vec<(String, &'static str, String, Vec<u8>)>,
+    /// External relationships: id, kind, and address.
+    externals: Vec<(String, &'static str, String)>,
 }
 
 impl RawSlide {
@@ -83,6 +85,13 @@ impl RawSlide {
     #[must_use]
     pub fn part(mut self, rid: &str, kind: &'static str, name: &str, bytes: &[u8]) -> Self {
         self.parts.push((rid.to_owned(), kind, name.to_owned(), bytes.to_vec()));
+        self
+    }
+
+    /// A relationship to something outside the package (a linked image).
+    #[must_use]
+    pub fn external(mut self, rid: &str, kind: &'static str, target: &str) -> Self {
+        self.externals.push((rid.to_owned(), kind, target.to_owned()));
         self
     }
 
@@ -324,9 +333,21 @@ impl RawDeck {
             }
             for (rid, kind, name, bytes) in &slide.parts {
                 slide_rels.push((rid.clone(), kind, format!("../{name}")));
-                binary.push((format!("ppt/{name}"), bytes.clone()));
+                // Slides may share a part (an image); it is written once.
+                let member = format!("ppt/{name}");
+                if !binary.iter().any(|(n, _)| *n == member) {
+                    binary.push((member, bytes.clone()));
+                }
             }
-            parts.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), owned_rels(&slide_rels)));
+            let mut rels_xml = owned_rels(&slide_rels);
+            for (rid, kind, target) in &slide.externals {
+                let entry = format!(
+                    r#"<Relationship Id="{rid}" Type="{REL}/{kind}" Target="{}" TargetMode="External"/>"#,
+                    escape(target)
+                );
+                rels_xml = rels_xml.replace("</Relationships>", &format!("{entry}</Relationships>"));
+            }
+            parts.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels_xml));
         }
 
         let content_types = format!(
