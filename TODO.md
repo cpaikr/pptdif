@@ -5,9 +5,10 @@ holds what is left. Remove an item when it lands.
 
 ## Next
 
-- **M3.** Resolve inherited formatting and placeholder geometry through
-  the layout, master, and theme; compare layouts, masters, and the theme;
-  check against PowerPoint (`TextRange.Font`, `Shape.Left/Top`).
+- **M4.** The HTML report: slides side by side, schematic first, then
+  PowerPoint slide images with changed shapes outlined.
+- **Inheritance not read:** table styles, a paragraph's own `a:defRPr`,
+  and shape fills and lines inherited from the layout.
 - **Alignment on real decks.** Review slide pairing on real version pairs
   once `fixtures/private/` has some; tune boilerplate (footers, logos)
   that repeats on most slides out of the slide tokens if it misleads.

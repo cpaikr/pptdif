@@ -30,6 +30,10 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   - [align.rs](crates/pptdif/src/align.rs): sequence alignment (anchors on
     unique content, similarity in the gaps, moves), for slides and
     paragraphs;
+  - [inherit.rs](crates/pptdif/src/inherit.rs): each slide shape's
+    effective geometry and text formatting, through the layout placeholder,
+    the master placeholder and text styles, the default style, and theme
+    fonts;
   - [chart.rs](crates/pptdif/src/chart.rs): a chart part's cached data
     (kinds, title, series names, categories, values);
   - [diff.rs](crates/pptdif/src/diff.rs): the comparison: slide pairing
@@ -82,11 +86,13 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   changes share one.
 - **Fields are not edits.** A field compares by its kind, not the text
   PowerPoint saved for it.
-- **Formatting as written.** Run, paragraph, and shape formatting is what
-  the file states; an absent property is inherited and compares as absent
-  until M3 resolves inheritance. Formatting is compared only on paragraphs
-  whose text did not change, and geometry only where both sides write an
-  `xfrm`.
+- **Inherited once.** Formatting and geometry compare as they take
+  effect, but a slide reports them only where what the slide itself writes
+  (its runs, paragraphs, list styles, and `xfrm`) differs; what changed in
+  a layout, master, or theme is one change there, not one per slide.
+  Formatting compares only on paragraphs whose text did not change. Shape
+  fills and lines compare as written, and table cells' formatting from
+  table styles is not read.
 - **Pictures by content.** An image compares by a hash of its bytes, so
   the same picture under another part name is no change.
 
@@ -129,6 +135,14 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd` and
   alignment and fills, replaced and renamed images, table cells, rows, and
   columns, chart series, z-order and grouping, comments, sections, and
   their mirroring.
+- [`crates/pptdif/tests/inherit.rs`](crates/pptdif/tests/inherit.rs)
+  covers placeholders inheriting geometry, size, and theme fonts; text
+  boxes taking the default style; layout, master, and theme changes
+  reported once; and slide overrides.
+- [`scripts/format_parity.py`](scripts/format_parity.py) compares the
+  resolved geometry and font size, bold, name, and alignment with
+  PowerPoint's own (COM) on the PowerPoint-saved fixture and the private
+  corpus; `scripts/check.py` runs it where PowerPoint is installed.
 - [`scripts/parity.py`](scripts/parity.py) compares each slide's id,
   layout, visibility, notes, and shape counts with python-pptx, an
   independent reader.

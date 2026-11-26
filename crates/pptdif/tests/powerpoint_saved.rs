@@ -18,12 +18,12 @@ fn slides_sections_and_layouts() {
     assert_eq!(deck.format, DeckFormat::Pptx);
     // 16:9 at 960 x 540 pt.
     assert_eq!(deck.slide_size.map(|s| (s.cx, s.cy)), Some((12_192_000, 6_858_000)));
-    assert_eq!(deck.slides.iter().map(|s| s.id).collect::<Vec<_>>(), [256, 257, 258, 259]);
+    assert_eq!(deck.slides.iter().map(|s| s.id).collect::<Vec<_>>(), [256, 257, 258, 259, 260]);
     // Sections sit in presentation.xml's p14 extension, each listing its
     // slides by `sldId` id.
     let sections: Vec<(&str, &[u32])> =
         deck.sections.iter().map(|s| (s.name.as_str(), s.slide_ids.as_slice())).collect();
-    assert_eq!(sections, [("Opening", &[256, 257][..]), ("Details", &[258, 259][..])]);
+    assert_eq!(sections, [("Opening", &[256, 257][..]), ("Details", &[258, 259, 260][..])]);
     assert_eq!(deck.slides[0].layout.as_deref(), Some("Title Slide"));
     assert_eq!(deck.masters[0].layouts.len(), 11);
 }
@@ -31,7 +31,7 @@ fn slides_sections_and_layouts() {
 #[test]
 fn hidden_slides_carry_show_zero() {
     let hidden: Vec<bool> = deck().slides.iter().map(|s| s.hidden).collect();
-    assert_eq!(hidden, [false, false, false, true]);
+    assert_eq!(hidden, [false, false, false, true, false]);
 }
 
 #[test]
@@ -41,9 +41,9 @@ fn notes_comments_and_animations() {
     // A modern comment: relationship type ending in `comments`
     // (office/2018/10), part `ppt/comments/modernComment_*.xml`, one
     // `p188:cm` per comment.
-    assert_eq!(deck.slides.iter().map(|s| s.comments.len()).collect::<Vec<_>>(), [0, 0, 0, 1]);
+    assert_eq!(deck.slides.iter().map(|s| s.comments.len()).collect::<Vec<_>>(), [0, 0, 0, 1, 0]);
     // PowerPoint writes `<p:timing>` only on the slide with an animation.
-    assert_eq!(deck.slides.iter().map(|s| s.animated).collect::<Vec<_>>(), [false, true, false, false]);
+    assert_eq!(deck.slides.iter().map(|s| s.animated).collect::<Vec<_>>(), [false, true, false, false, false]);
 }
 
 #[test]
@@ -98,6 +98,28 @@ fn pictures_tables_charts_and_comments() {
     // personal information renames it "Author".
     let comment = &deck.slides[3].comments[0];
     assert_eq!((comment.author.as_deref(), comment.text.as_str()), (Some("Author"), "Check the totals."));
+}
+
+#[test]
+fn inherited_formatting_and_geometry() {
+    let deck = deck();
+    // The title placeholder writes no geometry or size: both come from the
+    // layout and the master (PowerPoint reports 44 pt and these points).
+    let title = &deck.slides[1].shapes[0];
+    assert!(title.geometry.is_none());
+    let g = title.effective_geometry.unwrap();
+    assert_eq!((g.x, g.y), (838_200, 365_125));
+    let size = |s: &pptdif::model::Shape, p: usize| s.text.as_ref().unwrap()[p].runs[0].effective.get("size").cloned();
+    assert_eq!(size(title, 0).as_deref(), Some("44pt"));
+    // The body's second level is smaller, from the master's body style.
+    let body = &deck.slides[1].shapes[1];
+    assert_eq!((size(body, 0).as_deref(), size(body, 2).as_deref()), (Some("28pt"), Some("24pt")));
+    // Written over inherited: a moved placeholder, a bold 32 pt run.
+    let styled = &deck.slides[4].shapes[1];
+    let g = styled.effective_geometry.unwrap();
+    assert_eq!((g.x, g.y), (1_270_000, 2_032_000));
+    let bold = &styled.text.as_ref().unwrap()[1].runs[0].effective;
+    assert_eq!((bold.get("bold").map(String::as_str), bold.get("size").map(String::as_str)), (Some("1"), Some("32pt")));
 }
 
 #[test]

@@ -103,6 +103,9 @@ const fn kind_of(kind: Kind) -> diff::Kind {
         Kind::Chart => diff::Kind::Chart,
         Kind::Comment => diff::Kind::Comment,
         Kind::Section => diff::Kind::Section,
+        Kind::Layout => diff::Kind::Layout,
+        Kind::Master => diff::Kind::Master,
+        Kind::Theme => diff::Kind::Theme,
     }
 }
 

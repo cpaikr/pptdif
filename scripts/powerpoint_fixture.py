@@ -129,6 +129,22 @@ def fill(app, pres, saved: Path, image: Path, signers: list[str]) -> list[str]:
     except Exception as e:  # noqa: BLE001
         notes.append(f"no comment: {e}")
 
+    # 5: written formatting over inherited: a moved placeholder, a bold
+    # and resized run, a centred paragraph, and a text box in another font.
+    s5 = pres.Slides.AddSlide(5, content_layout)
+    s5.Shapes.Placeholders(1).TextFrame.TextRange.Text = "Styles"
+    body5 = s5.Shapes.Placeholders(2)
+    body5.Left, body5.Top = 100, 160
+    r5 = body5.TextFrame.TextRange
+    r5.Text = "Plain line\rBold line\rCentred line"
+    r5.Paragraphs(2).Font.Bold = MSO_TRUE
+    r5.Paragraphs(2).Font.Size = 32
+    r5.Paragraphs(3).ParagraphFormat.Alignment = 2
+    box5 = s5.Shapes.AddTextbox(1, 500, 420, 300, 40)
+    box5.TextFrame.TextRange.Text = "Boxed note"
+    box5.TextFrame.TextRange.Font.Name = "Arial"
+    box5.TextFrame.TextRange.Font.Size = 20
+
     # Two sections.
     props = pres.SectionProperties
     props.AddBeforeSlide(1, "Opening")

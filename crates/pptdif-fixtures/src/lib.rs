@@ -117,6 +117,14 @@ pub struct RawDeck {
     presentation_rels: Vec<(&'static str, String)>,
     /// Extra text parts, by member name.
     extra_parts: Vec<(String, String)>,
+    /// Shape XML in each layout's `spTree`, by layout index.
+    layout_shapes: Vec<String>,
+    /// The master's `spTree` shapes and its `p:txStyles` content.
+    master_shapes: String,
+    master_styles: String,
+    /// The theme's `a:themeElements` content and name.
+    theme: String,
+    theme_name: String,
 }
 
 impl Default for RawDeck {
@@ -137,6 +145,11 @@ impl RawDeck {
             slide_entries: String::new(),
             presentation_rels: Vec::new(),
             extra_parts: Vec::new(),
+            layout_shapes: vec![String::new(), String::new()],
+            master_shapes: String::new(),
+            master_styles: String::new(),
+            theme: String::new(),
+            theme_name: "Synthetic".to_owned(),
         }
     }
 
@@ -187,6 +200,39 @@ impl RawDeck {
     #[must_use]
     pub fn text_part(mut self, name: &str, xml: &str) -> Self {
         self.extra_parts.push((name.to_owned(), xml.to_owned()));
+        self
+    }
+
+    /// Shapes (placeholders, usually) in the layout at `index`.
+    /// The layouts' names, replacing the two defaults; slides name layouts
+    /// by index into this list.
+    #[must_use]
+    pub fn layout_names(mut self, names: &[&str]) -> Self {
+        self.layouts = names.iter().map(|n| (*n).to_owned()).collect();
+        self.layout_shapes = vec![String::new(); names.len()];
+        self
+    }
+
+    #[must_use]
+    pub fn layout_shapes(mut self, index: usize, shapes_xml: &str) -> Self {
+        shapes_xml.clone_into(&mut self.layout_shapes[index]);
+        self
+    }
+
+    /// The master's shapes and its text styles (the content of
+    /// `p:txStyles`: `p:titleStyle`, `p:bodyStyle`, `p:otherStyle`).
+    #[must_use]
+    pub fn master(mut self, shapes_xml: &str, styles_xml: &str) -> Self {
+        shapes_xml.clone_into(&mut self.master_shapes);
+        styles_xml.clone_into(&mut self.master_styles);
+        self
+    }
+
+    /// The theme's name and the content of its `a:themeElements`.
+    #[must_use]
+    pub fn theme(mut self, name: &str, elements_xml: &str) -> Self {
+        name.clone_into(&mut self.theme_name);
+        elements_xml.clone_into(&mut self.theme);
         self
     }
 
@@ -257,8 +303,9 @@ impl RawDeck {
             parts.push((
                 part.clone(),
                 format!(
-                    r#"<p:sldLayout {NAMESPACES}><p:cSld name="{}"><p:spTree/></p:cSld></p:sldLayout>"#,
-                    escape(name)
+                    r#"<p:sldLayout {NAMESPACES}><p:cSld name="{}"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{}</p:spTree></p:cSld></p:sldLayout>"#,
+                    escape(name),
+                    self.layout_shapes.get(i).map_or("", String::as_str)
                 ),
             ));
             parts.push((
@@ -269,13 +316,20 @@ impl RawDeck {
         }
         parts.push((
             "ppt/slideMasters/slideMaster1.xml".to_owned(),
-            format!("<p:sldMaster {NAMESPACES}><p:cSld><p:spTree/></p:cSld><p:sldLayoutIdLst>{layout_ids}</p:sldLayoutIdLst></p:sldMaster>"),
+            format!(
+                r#"<p:sldMaster {NAMESPACES}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{}</p:spTree></p:cSld><p:sldLayoutIdLst>{layout_ids}</p:sldLayoutIdLst><p:txStyles>{}</p:txStyles></p:sldMaster>"#,
+                self.master_shapes, self.master_styles
+            ),
         ));
         parts.push(("ppt/slideMasters/_rels/slideMaster1.xml.rels".to_owned(), owned_rels(&master_rels)));
         add_override("ppt/slideMasters/slideMaster1.xml", "slideMaster");
         parts.push((
             "ppt/theme/theme1.xml".to_owned(),
-            format!(r#"<a:theme xmlns:a="{A}" name="Synthetic"><a:themeElements/></a:theme>"#),
+            format!(
+                r#"<a:theme xmlns:a="{A}" name="{}"><a:themeElements>{}</a:themeElements></a:theme>"#,
+                escape(&self.theme_name),
+                self.theme
+            ),
         ));
 
         // Slides, with their notes and comments.
@@ -559,6 +613,30 @@ pub fn basic() -> RawDeck {
             ]
             .concat(),
         ),
+    )
+}
+
+/// A placeholder with geometry (EMU) and no text, as layouts and masters
+/// hold them; `list_style` is the content of its `a:lstStyle`.
+pub fn placeholder_def(
+    id: u32,
+    name: &str,
+    (kind, idx): (&str, u32),
+    (x, y, cx, cy): (i64, i64, i64, i64),
+    list_style: &str,
+) -> String {
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr/><p:nvPr><p:ph type="{kind}" idx="{idx}"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle>{list_style}</a:lstStyle><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>"#,
+        escape(name)
+    )
+}
+
+/// A theme's font scheme with these major and minor Latin typefaces.
+pub fn font_scheme(major: &str, minor: &str) -> String {
+    format!(
+        r#"<a:fontScheme name="Fonts"><a:majorFont><a:latin typeface="{}"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="{}"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme>"#,
+        escape(major),
+        escape(minor)
     )
 }
 

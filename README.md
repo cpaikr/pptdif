@@ -6,10 +6,11 @@ matched by content, so an inserted or reordered slide is one change, not
 every slide after it. Agents read its JSON; people will read its
 side-by-side HTML report. It needs no PowerPoint.
 
-**Status:** M0 to M2 are done: `inspect`, `text`, and `compare` over
-slides, shapes, text, notes, geometry, formatting as written, tables,
-pictures, charts, comments, and sections. Inherited formatting (M3) and
-the HTML report (M4) are next. See [PLAN.md](PLAN.md).
+**Status:** M0 to M3 are done: `inspect`, `text`, and `compare` over
+slides, shapes, text, notes, geometry, formatting (inherited through
+layouts, masters, and themes, and checked against PowerPoint), tables,
+pictures, charts, comments, sections, layouts, masters, and themes. The
+HTML report (M4) is next. See [PLAN.md](PLAN.md).
 
 ## Commands
 
@@ -33,8 +34,13 @@ the HTML report (M4) are next. See [PLAN.md](PLAN.md).
   (runs and paragraphs of unchanged text, a shape's outline, fill, and
   line), z-order and grouping, tables (columns and rows aligned, then
   cells), pictures by image content, charts' cached series, comments with
-  their authors and replies, and the deck's sections. Formatting a shape
-  inherits from its layout or master is not compared yet.
+  their authors and replies, and the deck's sections. Formatting and
+  geometry show the values in effect, inherited through the layout,
+  master, theme, and default style; a slide reports them only where it
+  writes something different, and a changed layout, master, or theme is
+  one change under `objects`. A slide that moves to another layout reports
+  what it now inherits as well. Table styles, a paragraph's own `a:defRPr`,
+  and fills and lines a shape inherits are not read (see [TODO.md](TODO.md)).
 
 All accept `--format text`. Run `pptdif <command> --help` for details.
 
