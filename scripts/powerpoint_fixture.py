@@ -58,10 +58,20 @@ def png(path: Path) -> None:
 def build(app, saved: Path, image: Path, signers: list[str]) -> list[str]:
     """Fills a new deck and saves it, adding to `signers` the names Office
     signs with. Returns notes on features this PowerPoint could not write."""
-    notes = []
     # Charts and SmartArt fail without a document window (observed
     # 2026-11-26), so the deck shows on screen while it is built.
     pres = app.Presentations.Add(WithWindow=True)
+    try:
+        return fill(app, pres, saved, image, signers)
+    finally:
+        # Close only the deck this script made: PowerPoint runs one
+        # instance, which may hold the user's own presentations.
+        pres.Close()
+
+
+def fill(app, pres, saved: Path, image: Path, signers: list[str]) -> list[str]:
+    """Builds the slides of `pres` and saves it."""
+    notes = []
     layouts = pres.SlideMaster.CustomLayouts
     title_layout, content_layout = layouts(1), layouts(2)
 
@@ -127,7 +137,6 @@ def build(app, saved: Path, image: Path, signers: list[str]) -> list[str]:
     pres.RemoveDocumentInformation(PP_RDI_PERSONAL)
     pres.RemoveDocumentInformation(PP_RDI_PROPERTIES)
     pres.SaveAs(str(saved), PP_SAVE_AS_OPEN_XML)
-    pres.Close()
     return notes
 
 
@@ -183,6 +192,13 @@ def main() -> int:
 
     # A neutral folder: PowerPoint records the folder a deck was saved in.
     work = Path(tempfile.mkdtemp(prefix="p", dir=os.environ.get("SystemDrive", "C:") + "\\"))
+    try:
+        return write(win32, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def write(win32, work: Path) -> int:
     saved, image = work / "powerpoint-saved.pptx", work / "dot.png"
     png(image)
     app = win32.DispatchEx("PowerPoint.Application")
@@ -191,22 +207,20 @@ def main() -> int:
         app.DisplayAlerts = PP_ALERTS_NONE
         notes = build(app, saved, image, signers)
     finally:
+        # Quit only an instance this script alone was using.
         if app.Presentations.Count == 0:
             app.Quit()
-    try:
-        needles = personal_strings(signers)
-        problems = leaks(saved.name, saved.read_bytes(), needles)
-        if problems:
-            print("\n".join(problems))
-            print("not written: the file would carry personal information")
-            return 1
-        OUT.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(saved, OUT / saved.name)
-        print(f"wrote {OUT / saved.name} ({saved.stat().st_size} bytes)")
-        for n in notes:
-            print(f"note: {n}")
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    needles = personal_strings(signers)
+    problems = leaks(saved.name, saved.read_bytes(), needles)
+    if problems:
+        print("\n".join(problems))
+        print("not written: the file would carry personal information")
+        return 1
+    OUT.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(saved, OUT / saved.name)
+    print(f"wrote {OUT / saved.name} ({saved.stat().st_size} bytes)")
+    for n in notes:
+        print(f"note: {n}")
     return 0
 
 
