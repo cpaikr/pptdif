@@ -54,6 +54,9 @@
   only for tags pushed by `sjunepark` (the maintainer); change its `if:` to
   add others. Never push tags or create releases as part of ordinary
   implementation work.
+- To release: set the version in `Cargo.toml`, run `cargo update
+  --workspace` so `Cargo.lock` carries it (the workflow builds with
+  `--locked`), commit both, then push the `v*` tag for that commit.
 
 ## Validation
 

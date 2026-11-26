@@ -13,9 +13,11 @@ Start broad, then narrow:
 2. `pptdif compare BASE OTHER --slide N --kind text,notes` (JSON) to work
    with one slide's wording. `--limit 0` lists everything; the default lists
    500 changes and `omitted` counts the rest by slide pair and kind.
-3. `pptdif text OTHER --slide N --format text` to read a slide's full
+3. `pptdif text OTHER --slide M --format text` to read a slide's full
    text, including table rows (`cell | cell`) and chart series
-   (`name: category value, ...`), for the context of a change.
+   (`name: category value, ...`), for the context of a change. `--slide`
+   on `compare` keeps a pair when either side is slide N, so take M from
+   the pair's `other.index` (and use `base.index` with `text BASE`).
 4. `pptdif compare BASE OTHER --format html -o REPORT.html` when a person
    will review the result. Name it after the decks
    (`<base>-vs-<other>.html`) beside them unless the user says otherwise;
@@ -68,7 +70,8 @@ added, removed, or holding other slides), `layout` and `master`
 - Formatting and geometry show the values in effect, but a slide reports
   them only where what the slide itself writes differs. A change to a
   layout, master, or theme is reported once under `objects`, not on every
-  slide; tell the user it affects every slide using that layout or master.
+  slide; tell the user it affects the slides using that layout or master
+  that do not set the changed property themselves.
 - A slide moved to a layout of another name reports what it now inherits
   (positions, sizes) as well as the layout change.
 - Slide numbers and dates in fields compare by kind, so renumbered footers
