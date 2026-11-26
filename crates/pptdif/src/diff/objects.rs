@@ -90,7 +90,9 @@ pub(super) fn shape_changes(
     changes.extend(text_format_changes(ta, (ai, ra), tb, (bi, rb), work));
     if let (Some(ia), Some(ib)) = (&sa.image, &sb.image) {
         let mut props = Vec::new();
-        if ia.hash != ib.hash {
+        // Embedded images compare by content, linked ones by address.
+        let what = |i: &crate::model::Image| (i.hash, if i.hash.is_none() { i.part.clone() } else { None });
+        if what(ia) != what(ib) {
             props.push(Property { name: "image", base: opt(ia.part.as_deref()), other: opt(ib.part.as_deref()) });
         }
         if ia.crop != ib.crop {
@@ -233,8 +235,17 @@ fn table_changes(
 ) -> Vec<Change> {
     let cells = |t: &Table| t.rows.len().saturating_mul(columns(t));
     if cells(ta) > MAX_TABLE_CELLS || cells(tb) > MAX_TABLE_CELLS {
+        // Too large to compare cell by cell: one change when any text
+        // differs, so the table is never taken as unchanged unread.
         work.fell_back = true;
-        return Vec::new();
+        let all = |t: &Table| -> Vec<String> {
+            t.rows.iter().flatten().map(|c| c.text.iter().map(Paragraph::text).collect::<Vec<_>>().join("\n")).collect()
+        };
+        if all(ta) == all(tb) {
+            return Vec::new();
+        }
+        let p = Property { name: "cells", base: json!(ta.rows.len()), other: json!(tb.rows.len()) };
+        return vec![changed(Kind::Table, side(ai, ra), side(bi, rb), vec![p])];
     }
     let column_item = |t: &Table, c: usize| {
         let mut tokens: Vec<u64> = (0..t.rows.len()).map(|r| hash(&normalize(&cell_text(t, r, c)))).collect();
@@ -278,6 +289,17 @@ fn table_changes(
     for c in (0..cb.len()).filter(|c| !paired_cols_b.contains(c)) {
         changes.push(Change::new(Kind::Table, Status::OnlyOther, None, Some(at(bi, rb, None, Some(c), header(tb, c)))));
     }
+    // Rows and columns that moved with their content.
+    for &(c, d) in &cols.moves {
+        let mut m = Change::new(Kind::Table, Status::Moved, Some(at(ai, ra, None, Some(c), header(ta, c))), None);
+        m.other = Some(at(bi, rb, None, Some(d), header(tb, d)));
+        changes.push(m);
+    }
+    for &(r, s) in &rows.moves {
+        let mut m = Change::new(Kind::Table, Status::Moved, Some(at(ai, ra, Some(r), None, row_text(ta, r))), None);
+        m.other = Some(at(bi, rb, Some(s), None, row_text(tb, s)));
+        changes.push(m);
+    }
     let row_pairs: Vec<(usize, usize)> = rows.pairs.iter().chain(&rows.moves).copied().collect();
     let paired_rows: HashSet<usize> = row_pairs.iter().map(|p| p.0).collect();
     let paired_rows_b: HashSet<usize> = row_pairs.iter().map(|p| p.1).collect();
@@ -306,13 +328,25 @@ fn table_changes(
     cell_pairs.sort_unstable();
     for (r, c, s, d) in cell_pairs {
         let (x, y) = (cell_text(ta, r, c), cell_text(tb, s, d));
-        if x != y {
-            changes.push(changed(
-                Kind::Table,
-                at(ai, ra, Some(r), Some(c), x),
-                at(bi, rb, Some(s), Some(d), y),
-                Vec::new(),
-            ));
+        let merged = |t: &Table, r: usize, c: usize| t.rows[r].get(c).is_some_and(|cell| cell.merged);
+        let mut props = Vec::new();
+        if merged(ta, r, c) != merged(tb, s, d) {
+            props.push(Property { name: "merged", base: json!(merged(ta, r, c)), other: json!(merged(tb, s, d)) });
+        }
+        if x != y || !props.is_empty() {
+            changes.push(changed(Kind::Table, at(ai, ra, Some(r), Some(c), x), at(bi, rb, Some(s), Some(d), y), props));
+        } else if let (Some(ca), Some(cb)) = (ta.rows[r].get(c), tb.rows[s].get(d)) {
+            // Unchanged text: its formatting, located at the cell.
+            for mut f in text_format_changes(&ca.text, (ai, ra), &cb.text, (bi, rb), work) {
+                for (side, (row, col)) in [(&mut f.base, (r, c)), (&mut f.other, (s, d))] {
+                    if let Some(side) = side {
+                        side.row = Some(row + 1);
+                        side.column = Some(col + 1);
+                    }
+                }
+                f.kind = Kind::Table;
+                changes.push(f);
+            }
         }
     }
     changes
@@ -379,9 +413,15 @@ fn chart_changes(a: &Chart, (ai, ra): (usize, &ShapeRef), b: &Chart, (bi, rb): (
         changes.push(Change::new(Kind::Chart, Status::OnlyOther, None, Some(named(bi, rb, s))));
         let _ = j;
     }
-    for (i, j) in pairs {
+    // Plot order: paired series outside the longest run kept in order.
+    let order: Vec<usize> = pairs.iter().map(|p| p.1).collect();
+    let in_order: HashSet<usize> = longest_increasing(&order).into_iter().collect();
+    for (k, (i, j)) in pairs.into_iter().enumerate() {
         let (x, y) = (&a.series[i], &b.series[j]);
         let mut props = Vec::new();
+        if !in_order.contains(&k) {
+            props.push(Property { name: "order", base: json!(i + 1), other: json!(j + 1) });
+        }
         if x.name != y.name {
             props.push(Property { name: "name", base: opt(x.name.as_deref()), other: opt(y.name.as_deref()) });
         }
@@ -581,4 +621,21 @@ pub(super) fn section_changes(
         });
     }
     changes
+}
+
+/// A paired group's own geometry, where what it writes differs.
+pub(super) fn group_changes(
+    ga: &Shape,
+    (ai, ra): (usize, &ShapeRef),
+    gb: &Shape,
+    (bi, rb): (usize, &ShapeRef),
+    tolerance: i64,
+) -> Vec<Change> {
+    match (&ga.geometry, &gb.geometry) {
+        (Some(x), Some(y)) if x != y => {
+            let props = geometry_properties(x, y, tolerance);
+            if props.is_empty() { Vec::new() } else { vec![changed(Kind::Geometry, side(ai, ra), side(bi, rb), props)] }
+        }
+        _ => Vec::new(),
+    }
 }

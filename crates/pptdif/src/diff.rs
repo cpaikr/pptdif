@@ -296,6 +296,11 @@ fn normalize(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
 }
 
+/// A slide's groups, nested ones included, depth first.
+fn groups(slide: &Slide) -> Vec<&Shape> {
+    slide.all_shapes().filter(|s| s.kind == ShapeKind::Group).collect()
+}
+
 /// The shapes compared one by one: every shape except groups, whose
 /// members stand for them.
 fn leaves(slide: &Slide) -> Vec<&Shape> {
@@ -776,6 +781,13 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
 
     let (la, lb) = (leaves(a), leaves(b));
     let pairs = pair_shapes(&la, &lb, work);
+    // Groups compare their own geometry: a group moved as a unit moves its
+    // members without changing their coordinates inside it.
+    let (ga, gb) = (groups(a), groups(b));
+    for (i, j) in pair_shapes(&ga, &gb, work) {
+        let (ra, rb) = (shape_ref(ga[i], 0), shape_ref(gb[j], 0));
+        changes.extend(objects::group_changes(ga[i], (ai, &ra), gb[j], (bi, &rb), tolerance));
+    }
     let (pa, pb): (HashSet<usize>, HashSet<usize>) =
         (pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect());
     let shape_side = |slide: usize, shape: &Shape, k: usize| Side {
@@ -1028,7 +1040,7 @@ pub struct Listing {
     pub summary: Summary,
     /// Changes listed after filters and the limit.
     pub listed: usize,
-    /// Changes the limit cut, by slide pair and kind.
+    /// Changes the limit cut, by slide pair (or `objects`) and kind.
     pub omitted: BTreeMap<String, BTreeMap<&'static str, usize>>,
     pub slides: Vec<SlidePair>,
     /// Deck-level changes; `--slide` leaves them out.
@@ -1097,21 +1109,23 @@ pub fn listing(comparison: &Comparison, filter: &Filter) -> Listing {
             changes: kept,
         });
     }
-    let objects: Vec<ObjectChange> = if filter.slide.is_some() {
-        Vec::new()
-    } else {
-        comparison
-            .objects
-            .iter()
-            .filter(|o| filter.kinds.is_empty() || filter.kinds.contains(&o.kind))
-            .cloned()
-            .collect()
-    };
+    // Deck-level changes share the limit; `--slide` leaves them out.
+    let mut objects: Vec<ObjectChange> = Vec::new();
+    if filter.slide.is_none() {
+        for o in comparison.objects.iter().filter(|o| filter.kinds.is_empty() || filter.kinds.contains(&o.kind)) {
+            if filter.limit == 0 || listed < filter.limit {
+                listed += 1;
+                objects.push(o.clone());
+            } else {
+                *omitted.entry("objects".to_owned()).or_default().entry(o.kind.as_str()).or_default() += 1;
+            }
+        }
+    }
     Listing {
         base: comparison.base.clone(),
         other: comparison.other.clone(),
         summary: summarize(comparison),
-        listed: listed + objects.len(),
+        listed,
         omitted,
         slides,
         objects,
