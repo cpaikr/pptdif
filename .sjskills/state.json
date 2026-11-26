@@ -39,6 +39,15 @@
     },
     {
       "scope": "project",
+      "skill": "clear-rust",
+      "target": ".agents",
+      "sourceIdentity": "github:sjunepark/agent-scripts",
+      "treeHashAlgorithm": "tree-sha256-v3",
+      "treeHash": "bf1246229809090cbcfa159257c141b5bc84fa19ce52e953520867b8779151f1",
+      "recordedAt": "2026-11-26T01:33:29.9287622Z"
+    },
+    {
+      "scope": "project",
       "skill": "code-review",
       "target": ".agents",
       "sourceIdentity": "github:sjunepark/agent-scripts",
@@ -129,6 +138,15 @@
     },
     {
       "scope": "project",
+      "skill": "modern-rust",
+      "target": ".agents",
+      "sourceIdentity": "github:sjunepark/agent-scripts",
+      "treeHashAlgorithm": "tree-sha256-v3",
+      "treeHash": "0f5e0948d33bd796740edcffe933468b8debbf2d03735b36d1e85edeaa2c6bbb",
+      "recordedAt": "2026-11-26T01:33:29.9287622Z"
+    },
+    {
+      "scope": "project",
       "skill": "teach",
       "target": ".agents",
       "sourceIdentity": "github:sjunepark/agent-scripts",
@@ -180,6 +198,15 @@
       "treeHashAlgorithm": "tree-sha256-v3",
       "treeHash": "4192a91b946e58c012500217f12f6c39538ad1241b7919251f58099c650d1a9b",
       "recordedAt": "2026-11-26T01:16:40.355245Z"
+    },
+    {
+      "scope": "project",
+      "skill": "clear-rust",
+      "target": ".claude",
+      "sourceIdentity": "github:sjunepark/agent-scripts",
+      "treeHashAlgorithm": "tree-sha256-v3",
+      "treeHash": "bf1246229809090cbcfa159257c141b5bc84fa19ce52e953520867b8779151f1",
+      "recordedAt": "2026-11-26T01:33:29.9287622Z"
     },
     {
       "scope": "project",
@@ -261,6 +288,15 @@
       "treeHashAlgorithm": "tree-sha256-v3",
       "treeHash": "d212facdfd7ca9601eb64e524f95b650d6037b855d17f23df90a800c22b844a6",
       "recordedAt": "2026-11-26T01:16:40.355245Z"
+    },
+    {
+      "scope": "project",
+      "skill": "modern-rust",
+      "target": ".claude",
+      "sourceIdentity": "github:sjunepark/agent-scripts",
+      "treeHashAlgorithm": "tree-sha256-v3",
+      "treeHash": "0f5e0948d33bd796740edcffe933468b8debbf2d03735b36d1e85edeaa2c6bbb",
+      "recordedAt": "2026-11-26T01:33:29.9287622Z"
     },
     {
       "scope": "project",

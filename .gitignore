@@ -1,0 +1,10 @@
+# Confidential real presentations for local checks only.
+/fixtures/private/
+
+# Scratch output from local experiments.
+/.tmp/
+__pycache__/
+*.pyc
+
+# Rust build output.
+/target/
