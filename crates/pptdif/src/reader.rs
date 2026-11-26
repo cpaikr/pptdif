@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use crate::align::fnv;
 use crate::model::{
-    Cell, ChartRef, Comment, DeckFormat, Format, Geometry, Image, Master, Paragraph, Placeholder, Presentation, Run,
-    RunKind, Section, Shape, ShapeKind, Size, Slide, Table, Warning,
+    Cell, ChartRef, Comment, DeckFormat, Format, Geometry, Image, LayoutDef, LevelStyle, Levels, Master, MasterDef,
+    Paragraph, Placeholder, Presentation, Run, RunKind, Section, Shape, ShapeKind, Size, Slide, THEME_COLORS, Table,
+    Template, Theme, Warning,
 };
 use crate::package::{Limits, Package, Relationship};
 use crate::xml::{Element, Event, Parser};
@@ -164,13 +165,15 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
     unread.vba = rels.values().any(|r| r.kind == "vbaProject");
 
     let authors = read_authors(pkg, &rels, &mut budget)?;
-    let mut ctx = Context { budget, layouts: LayoutNames::default(), images: HashMap::new(), authors };
+    let template = Template { default_style: listing.default_style.clone(), ..Template::default() };
+    let mut ctx =
+        Context { budget, template, layouts: HashMap::new(), masters: HashMap::new(), images: HashMap::new(), authors };
     let mut masters = Vec::new();
     // A master listed twice is read once.
     let mut seen_masters = HashSet::new();
     for rid in listing.master_rids.iter().filter(|rid| seen_masters.insert(rid.as_str())) {
         let Some(rel) = rels.get(rid).filter(|r| r.kind == "slideMaster" && !r.external) else { continue };
-        masters.push(read_master(pkg, &rel.target, &mut ctx.layouts, &mut ctx.budget)?);
+        masters.push(read_master(pkg, &rel.target, &mut ctx)?);
     }
 
     let mut slides = Vec::new();
@@ -192,14 +195,17 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         slides.push(slide);
     }
 
-    Ok(Presentation {
+    let mut presentation = Presentation {
         format,
         slide_size: listing.slide_size,
         slides,
         sections: listing.sections,
         masters,
+        template: ctx.template,
         warnings: unread.warning().into_iter().collect(),
-    })
+    };
+    crate::inherit::resolve(&mut presentation);
+    Ok(presentation)
 }
 
 /// What `presentation.xml` lists.
@@ -210,6 +216,7 @@ struct Listing {
     master_rids: Vec<String>,
     sections: Vec<Section>,
     custom_shows: bool,
+    default_style: Levels,
 }
 
 fn number<T: std::str::FromStr>(e: &Element, name: &str) -> Option<T> {
@@ -224,6 +231,7 @@ fn read_presentation_part(text: &str, part: &str, budget: &mut Budget) -> Result
         master_rids: Vec::new(),
         sections: Vec::new(),
         custom_shows: false,
+        default_style: Levels::new(),
     };
     // `sldId` appears both in the show order and, with the same local
     // name, inside each section of the `p14` extension.
@@ -268,6 +276,7 @@ fn read_presentation_part(text: &str, part: &str, budget: &mut Budget) -> Result
                 }
                 // An empty list defines no show.
                 "custShow" => listing.custom_shows = true,
+                "defaultTextStyle" => listing.default_style = read_list_style(&mut parser, budget)?,
                 _ => {}
             },
             Event::End(name) => match name.as_str() {
@@ -295,64 +304,208 @@ fn common_slide_name(text: &str, part: &str) -> Result<Option<Arc<str>>, Error> 
     }
 }
 
-/// Layout names by part, read once however many slides use a layout and
-/// shared, so a name is never copied per use.
-#[derive(Default)]
-struct LayoutNames(HashMap<String, Option<Arc<str>>>);
-
-impl LayoutNames {
-    fn get<R: Read + Seek>(&mut self, pkg: &mut Package<R>, part: &str) -> Result<Option<Arc<str>>, Error> {
-        if let Some(name) = self.0.get(part) {
-            return Ok(name.clone());
-        }
-        let name = match pkg.read_text(part)? {
-            Some(text) => common_slide_name(&text, part)?,
-            None => None,
-        };
-        self.0.insert(part.to_owned(), name.clone());
-        Ok(name)
-    }
-}
-
-fn read_master<R: Read + Seek>(
-    pkg: &mut Package<R>,
-    part: &str,
-    names: &mut LayoutNames,
-    budget: &mut Budget,
-) -> Result<Master, Error> {
+/// A master part, read whole: its name, layouts, shapes, text styles, and
+/// theme. Returns the view `inspect` shows; the rest joins the template.
+fn read_master<R: Read + Seek>(pkg: &mut Package<R>, part: &str, ctx: &mut Context) -> Result<Master, Error> {
     let text = pkg.read_text(part)?.ok_or_else(|| missing(part))?;
     let name = common_slide_name(&text, part)?;
     let rels: HashMap<String, Relationship> = pkg.relationships(part)?.into_iter().map(|r| (r.id.clone(), r)).collect();
+    let mut def = MasterDef {
+        part: part.to_owned(),
+        name: name.clone(),
+        shapes: Vec::new(),
+        title_style: Levels::new(),
+        body_style: Levels::new(),
+        other_style: Levels::new(),
+        theme: None,
+    };
     // The master lists its layouts in order (`sldLayoutIdLst`); its
     // relationships alone have no order.
     let mut layout_rids = Vec::new();
     let mut parser = Parser::new(&text, part);
     loop {
         match parser.next()? {
-            Event::Start(e) if e.name == "sldLayoutId" => {
-                if let Some(rid) = e.prefixed_attr("id") {
-                    budget.take()?;
-                    layout_rids.push(rid.to_owned());
+            Event::Start(e) => match e.name.as_str() {
+                "sldLayoutId" => {
+                    if let Some(rid) = e.prefixed_attr("id") {
+                        ctx.budget.take()?;
+                        layout_rids.push(rid.to_owned());
+                    }
                 }
-            }
+                "spTree" => def.shapes = read_shape(&mut parser, ShapeKind::Group, &mut ctx.budget)?.children,
+                "titleStyle" => def.title_style = read_list_style(&mut parser, &mut ctx.budget)?,
+                "bodyStyle" => def.body_style = read_list_style(&mut parser, &mut ctx.budget)?,
+                "otherStyle" => def.other_style = read_list_style(&mut parser, &mut ctx.budget)?,
+                _ => {}
+            },
             Event::Eof => break,
             _ => {}
         }
     }
+    if let Some(rel) = rels.values().find(|r| r.kind == "theme" && !r.external)
+        && let Some(text) = pkg.read_text(&rel.target)?
+    {
+        def.theme = Some(read_theme(&text, &rel.target)?);
+    }
+    let index = ctx.template.masters.len();
+    ctx.template.masters.push(def);
+    ctx.masters.insert(part.to_owned(), index);
     let mut layouts = Vec::new();
     for rid in layout_rids {
         if let Some(rel) = rels.get(&rid).filter(|r| r.kind == "slideLayout" && !r.external) {
-            layouts.push(names.get(pkg, &rel.target)?);
+            let layout = layout_index(pkg, &rel.target, Some(index), ctx)?;
+            layouts.push(ctx.template.layouts[layout].name.clone());
         }
     }
     Ok(Master { name, layouts })
+}
+
+/// The layout part's index in the template, read the first time it is
+/// named: by its master, or by a slide whose layout no master lists.
+fn layout_index<R: Read + Seek>(
+    pkg: &mut Package<R>,
+    part: &str,
+    master: Option<usize>,
+    ctx: &mut Context,
+) -> Result<usize, Error> {
+    if let Some(&index) = ctx.layouts.get(part) {
+        return Ok(index);
+    }
+    let mut def = LayoutDef { part: part.to_owned(), name: None, master, shapes: Vec::new() };
+    if let Some(text) = pkg.read_text(part)? {
+        def.name = common_slide_name(&text, part)?;
+        let mut parser = Parser::new(&text, part);
+        loop {
+            match parser.next()? {
+                Event::Start(e) if e.name == "spTree" => {
+                    def.shapes = read_shape(&mut parser, ShapeKind::Group, &mut ctx.budget)?.children;
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        if def.master.is_none() {
+            let rels = pkg.relationships(part)?;
+            def.master =
+                rels.iter().find(|r| r.kind == "slideMaster").and_then(|r| ctx.masters.get(&r.target).copied());
+        }
+    }
+    let index = ctx.template.layouts.len();
+    ctx.template.layouts.push(def);
+    ctx.layouts.insert(part.to_owned(), index);
+    Ok(index)
+}
+
+/// A theme part: its name, the major and minor fonts, and the colour
+/// scheme's slots.
+fn read_theme(text: &str, part: &str) -> Result<Theme, Error> {
+    let mut theme = Theme::default();
+    let mut parser = Parser::new(text, part);
+    // Which font of the scheme is open.
+    let mut font: Option<bool> = None;
+    let mut in_colors = false;
+    loop {
+        match parser.next()? {
+            Event::Start(e) => match e.name.as_str() {
+                "theme" => theme.name = e.plain_attr("name").map(str::to_owned),
+                "clrScheme" => in_colors = true,
+                slot if in_colors && THEME_COLORS.contains(&slot) => {
+                    let key = THEME_COLORS.iter().find(|s| **s == slot).copied().expect("just checked");
+                    theme.colors.insert(key, parser.describe_rest()?);
+                }
+                "majorFont" => font = Some(true),
+                "minorFont" => font = Some(false),
+                "latin" | "ea" if font.is_some() => {
+                    let face = e.plain_attr("typeface").filter(|f| !f.is_empty()).map(str::to_owned);
+                    match (font, e.name.as_str()) {
+                        (Some(true), "latin") => theme.major = face,
+                        (Some(false), "latin") => theme.minor = face,
+                        (Some(true), _) => theme.major_east_asian = face,
+                        _ => theme.minor_east_asian = face,
+                    }
+                }
+                _ => {}
+            },
+            Event::End(name) => match name.as_str() {
+                "clrScheme" => in_colors = false,
+                "majorFont" | "minorFont" => font = None,
+                _ => {}
+            },
+            Event::Text(_) => {}
+            Event::Eof => return Ok(theme),
+        }
+    }
+}
+
+/// A list style (`a:lstStyle`, `p:titleStyle`, `p:defaultTextStyle`, ...),
+/// its start tag just read: each level's paragraph properties and default
+/// run properties.
+fn read_list_style(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Levels, Error> {
+    let mut levels: Levels = vec![LevelStyle::default(); 9];
+    loop {
+        match parser.next()? {
+            Event::Start(e) => {
+                let level = e
+                    .name
+                    .strip_prefix("lvl")
+                    .and_then(|n| n.strip_suffix("pPr"))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .filter(|n| (1..=9).contains(n));
+                match level {
+                    Some(n) => {
+                        budget.take()?;
+                        levels[n - 1] = read_level(parser, &e)?;
+                    }
+                    None => parser.skip_element()?,
+                }
+            }
+            Event::End(_) | Event::Eof => return Ok(levels),
+            Event::Text(_) => {}
+        }
+    }
+}
+
+/// One level of a list style (`a:lvlNpPr`), its start tag just read.
+fn read_level(parser: &mut Parser<'_>, e: &Element) -> Result<LevelStyle, Error> {
+    let mut level = LevelStyle::default();
+    if let Some(a) = e.plain_attr("algn") {
+        level.paragraph.insert("align", a.to_owned());
+    }
+    loop {
+        match parser.next()? {
+            Event::Start(c) => match c.name.as_str() {
+                "defRPr" => level.run = read_run_format(parser, &c)?,
+                "buNone" | "buChar" | "buAutoNum" | "buBlip" => {
+                    level.paragraph.insert("bullet", bullet(&c));
+                    parser.skip_element()?;
+                }
+                _ => parser.skip_element()?,
+            },
+            Event::End(_) | Event::Eof => return Ok(level),
+            Event::Text(_) => {}
+        }
+    }
+}
+
+/// A bullet element as compared: `none`, `char:•`, `number:arabicPeriod`,
+/// or `picture`.
+fn bullet(e: &Element) -> String {
+    match e.name.as_str() {
+        "buNone" => "none".to_owned(),
+        "buChar" => format!("char:{}", e.plain_attr("char").unwrap_or_default()),
+        "buAutoNum" => format!("number:{}", e.plain_attr("type").unwrap_or_default()),
+        _ => "picture".to_owned(),
+    }
 }
 
 /// What reading every slide shares: the record budget, layout names, image
 /// hashes, and comment authors.
 struct Context {
     budget: Budget,
-    layouts: LayoutNames,
+    /// Masters and layouts as read so far, and their indices by part.
+    template: Template,
+    layouts: HashMap<String, usize>,
+    masters: HashMap<String, usize>,
     /// Content hashes by image part, so a picture used on many slides is
     /// read once.
     images: HashMap<String, Option<u64>>,
@@ -398,6 +551,7 @@ fn read_slide<R: Read + Seek>(pkg: &mut Package<R>, part: &str, id: u32, ctx: &m
     let rels = pkg.relationships(part)?;
     let mut slide = Slide {
         part: part.to_owned(),
+        layout_part: None,
         id,
         hidden: false,
         layout: None,
@@ -424,7 +578,11 @@ fn read_slide<R: Read + Seek>(pkg: &mut Package<R>, part: &str, id: u32, ctx: &m
     resolve_parts(pkg, &mut slide.shapes, &targets, ctx)?;
     for rel in rels.iter().filter(|r| !r.external) {
         match rel.kind.as_str() {
-            "slideLayout" => slide.layout = ctx.layouts.get(pkg, &rel.target)?,
+            "slideLayout" => {
+                let index = layout_index(pkg, &rel.target, None, ctx)?;
+                slide.layout.clone_from(&ctx.template.layouts[index].name);
+                slide.layout_part = Some(rel.target.clone());
+            }
             "notesSlide" => {
                 let notes = match pkg.read_text(&rel.target)? {
                     Some(text) => read_notes(&text, &rel.target, &mut ctx.budget)?,
@@ -806,7 +964,9 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                         continue;
                     }
                     "txBody" if depth == 1 && kind == ShapeKind::Shape && shape.text.is_none() => {
-                        shape.text = Some(read_text_body(parser, budget)?);
+                        let (text, style) = read_text_body_styled(parser, budget)?;
+                        shape.text = Some(text);
+                        shape.list_style = style;
                         continue;
                     }
                     "blipFill" if depth == 1 && kind == ShapeKind::Picture && shape.image.is_none() => {
@@ -924,6 +1084,15 @@ fn read_run_format(parser: &mut Parser<'_>, e: &Element) -> Result<Format, Error
 /// styles (`a:lstStyle`) are not read here: they are inherited formatting
 /// (M3).
 fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
+    Ok(read_text_body_styled(parser, budget)?.0)
+}
+
+/// [`read_text_body`], with the body's own list styles.
+fn read_text_body_styled(
+    parser: &mut Parser<'_>,
+    budget: &mut Budget,
+) -> Result<(Vec<Paragraph>, Option<Levels>), Error> {
+    let mut style = None;
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     // A field's kind and whether it had text, while inside its `a:fld`.
     let mut field: Option<String> = None;
@@ -937,12 +1106,18 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
     loop {
         match parser.next()? {
             Event::Start(e) => match e.name.as_str() {
-                "AlternateContent" | "lstStyle" | "bodyPr" | "endParaRPr" | "defRPr" => parser.skip_element()?,
+                "lstStyle" => style = Some(read_list_style(parser, budget)?),
+                "AlternateContent" | "bodyPr" | "endParaRPr" | "defRPr" => parser.skip_element()?,
                 "p" => {
                     budget.take()?;
                     depth += 1;
                     paragraph_depth = depth;
-                    paragraphs.push(Paragraph { level: 0, format: Format::new(), runs: Vec::new() });
+                    paragraphs.push(Paragraph {
+                        level: 0,
+                        format: Format::new(),
+                        effective: Format::new(),
+                        runs: Vec::new(),
+                    });
                 }
                 "pPr" if depth == paragraph_depth => {
                     depth += 1;
@@ -955,12 +1130,7 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                 }
                 "buNone" | "buChar" | "buAutoNum" | "buBlip" => {
                     depth += 1;
-                    let bullet = match e.name.as_str() {
-                        "buNone" => "none".to_owned(),
-                        "buChar" => format!("char:{}", e.plain_attr("char").unwrap_or_default()),
-                        "buAutoNum" => format!("number:{}", e.plain_attr("type").unwrap_or_default()),
-                        _ => "picture".to_owned(),
-                    };
+                    let bullet = bullet(&e);
                     if let Some(p) = paragraphs.last_mut() {
                         p.format.insert("bullet", bullet);
                     }
@@ -981,12 +1151,17 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                         }
                         None => RunKind::Text,
                     };
-                    p.runs.push(Run { kind, text, format: format.clone() });
+                    p.runs.push(Run { kind, text, format: format.clone(), effective: Format::new() });
                 }
                 "br" => {
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
-                        p.runs.push(Run { kind: RunKind::Break, text: String::new(), format: Format::new() });
+                        p.runs.push(Run {
+                            kind: RunKind::Break,
+                            text: String::new(),
+                            format: Format::new(),
+                            effective: Format::new(),
+                        });
                     }
                 }
                 "fld" => {
@@ -1003,15 +1178,20 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                     && !field_text
                     && let Some(p) = paragraphs.last_mut()
                 {
-                    p.runs.push(Run { kind: RunKind::Field(kind), text: String::new(), format: Format::new() });
+                    p.runs.push(Run {
+                        kind: RunKind::Field(kind),
+                        text: String::new(),
+                        format: Format::new(),
+                        effective: Format::new(),
+                    });
                 }
                 depth -= 1;
                 if depth == 0 {
-                    return Ok(paragraphs);
+                    return Ok((paragraphs, style));
                 }
             }
             Event::Text(_) => {}
-            Event::Eof => return Ok(paragraphs),
+            Event::Eof => return Ok((paragraphs, style)),
         }
     }
 }

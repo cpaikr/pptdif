@@ -5,7 +5,8 @@ smoke run of the built executable, and reader parity against python-pptx.
 Usage: python scripts/check.py
 
 Standard library only, except that the parity check runs scripts/parity.py,
-which needs python-pptx. Output never names private decks or prints their
+which needs python-pptx, and the format check (Windows with PowerPoint and
+pywin32 only) runs scripts/format_parity.py. Output never names private decks or prints their
 contents.
 """
 
@@ -195,6 +196,49 @@ def compare_smoke() -> None:
         print(f"ok   compare smoke ({len(decks)} self-compares, {len(pairs)} pairs)")
 
 
+_powerpoint_from_python: bool | None = None
+
+
+def powerpoint_from_python() -> bool:
+    """Whether Python can drive PowerPoint here: Windows, PowerPoint, and
+    pywin32. Starts PowerPoint once to find out."""
+    global _powerpoint_from_python
+    if _powerpoint_from_python is None:
+        probe = (
+            "import win32com.client as w; a = w.DispatchEx('PowerPoint.Application')\n"
+            "if a.Presentations.Count == 0: a.Quit()"
+        )
+        ran = sys.platform == "win32" and subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True)
+        _powerpoint_from_python = bool(ran) and ran.returncode == 0
+    return _powerpoint_from_python
+
+
+def format_parity() -> None:
+    """Geometry and text formatting resolved through layouts, masters, and
+    themes agree with PowerPoint's own on the PowerPoint-saved fixture and,
+    when present, the private corpus (counts only). Needs Windows,
+    PowerPoint, and pywin32; skipped with a note when they are absent."""
+    if not powerpoint_from_python():
+        print("skip format parity: needs Windows, PowerPoint, and pywin32")
+        return
+    proc = subprocess.run(["cargo", "build", "-q", "--locked", "-p", "pptdif", "--example", "formats"], cwd=ROOT)
+    if proc.returncode != 0:
+        fail("format parity: building the formats example failed")
+        return
+    exe = str(TARGET / "debug" / "examples" / ("formats.exe" if sys.platform == "win32" else "formats"))
+    script = str(ROOT / "scripts" / "format_parity.py")
+    runs = [("PowerPoint-saved fixture", ["--show"], [str(p) for p in sorted(SAVED.glob("*.pptx"))])]
+    private = [str(p) for p in private_decks()]
+    if private:
+        runs.append((f"private corpus ({len(private)} decks)", [], private))
+    for label, flags, decks in runs:
+        proc = subprocess.run([sys.executable, "-I", script, *flags, exe, *decks])
+        if proc.returncode != 0:
+            fail(f"format parity: {label}")
+        else:
+            print(f"ok   format parity {label}")
+
+
 def main() -> int:
     if SKILLS.is_dir():
         for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
@@ -203,6 +247,7 @@ def main() -> int:
     cli_smoke()
     parity()
     compare_smoke()
+    format_parity()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1

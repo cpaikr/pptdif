@@ -29,7 +29,12 @@ Status:
   z-order and grouping, tables, pictures by content hash, charts' cached
   series, comments with authors and replies, and sections, each observed
   in the PowerPoint-saved fixture where PowerPoint writes it.
-- Next action: M3 ([TODO.md](TODO.md)).
+- M3 is done: inheritance through layout and master placeholders, the
+  master's text styles, the default style, and theme fonts, checked
+  against PowerPoint on the fixture (124 properties agree); layouts,
+  masters, and themes compare once, and slides report inherited values
+  only where they write something different.
+- Next action: M4, the HTML report ([TODO.md](TODO.md)).
 
 ## Decisions
 

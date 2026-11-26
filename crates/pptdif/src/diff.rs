@@ -54,10 +54,16 @@ pub enum Kind {
     Comment,
     /// The deck's sections.
     Section,
+    /// A slide layout's placeholders (deck-level).
+    Layout,
+    /// A slide master's placeholders and text styles (deck-level).
+    Master,
+    /// A master's theme: its fonts and colours (deck-level).
+    Theme,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 11] = [
+    pub const ALL: [Kind; 14] = [
         Kind::Slide,
         Kind::Shape,
         Kind::Text,
@@ -69,6 +75,9 @@ impl Kind {
         Kind::Chart,
         Kind::Comment,
         Kind::Section,
+        Kind::Layout,
+        Kind::Master,
+        Kind::Theme,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -84,6 +93,9 @@ impl Kind {
             Kind::Chart => "chart",
             Kind::Comment => "comment",
             Kind::Section => "section",
+            Kind::Layout => "layout",
+            Kind::Master => "master",
+            Kind::Theme => "theme",
         }
     }
 }
@@ -248,7 +260,7 @@ pub struct Comparison {
     pub base: DeckRef,
     pub other: DeckRef,
     pub slides: Vec<SlidePair>,
-    /// Changes to the deck itself (sections).
+    /// Changes to the deck itself: sections, layouts, masters, themes.
     pub objects: Vec<ObjectChange>,
     /// A slide, shape, or paragraph pairing exceeded its work bounds
     /// somewhere and may have missed the best pairing.
@@ -984,7 +996,8 @@ pub fn compare(
     for pair in &mut slides {
         assign_ids(pair);
     }
-    let objects = objects::section_changes(base, other, &matched.pairs);
+    let mut objects = objects::section_changes(base, other, &matched.pairs);
+    objects.extend(objects::template_changes(base, other));
     Comparison {
         base: DeckRef { file: base_file.to_owned(), slides: base.slides.len() },
         other: DeckRef { file: other_file.to_owned(), slides: other.slides.len() },

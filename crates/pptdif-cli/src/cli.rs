@@ -58,6 +58,9 @@ pub enum Kind {
     Chart,
     Comment,
     Section,
+    Layout,
+    Master,
+    Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -125,16 +128,19 @@ Reading the result:
   text. Kinds: slide (added, removed, moved, visibility, layout), shape
   (added, removed, kind, name, zOrder, group), text and notes (paragraphs),
   geometry (x, y, width, height in points, rotation, flips; beyond
-  --tolerance), format (as written: run and paragraph formatting of
-  unchanged text, a shape's outline, fill, and line), table (rows, columns,
+  --tolerance), format (run and paragraph formatting of unchanged text, a
+  shape's outline, fill, and line), table (rows, columns,
   cells), picture (image content, crop), chart (kinds, title, series
-  categories and values as cached), comment (text, author, replies), and
-  section (deck-level, under objects). Changed properties are listed with
+  categories and values as cached), comment (text, author, replies), and,
+  under objects, section, layout and master (placeholders, text styles),
+  and theme (fonts, colours). Changed properties are listed with
   both values. summary counts everything; listed and omitted say what
   --kind, --slide, and --limit left out. Fields compare by kind, not by the
   number or date they showed, so renumbered footers are not changes.
-  Formatting a shape inherits from its layout or master is not compared
-  yet.")]
+  Formatting and geometry show the values in effect (inherited through the
+  layout, master, and theme), and are reported on a slide only where the
+  slide itself writes something different; a change to a layout, master,
+  or theme is reported once, under objects.")]
     Compare {
         /// The earlier presentation (left side).
         base: PathBuf,

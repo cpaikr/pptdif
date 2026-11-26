@@ -88,6 +88,10 @@ pub struct Run {
     pub text: String,
     /// `a:rPr` as written.
     pub format: Format,
+    /// The formatting in effect: `format`, then what the shape, its layout
+    /// and master placeholders, the master's text styles, and the
+    /// presentation's default style give, with theme fonts named.
+    pub effective: Format,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +100,8 @@ pub struct Paragraph {
     pub level: u8,
     /// `a:pPr` as written (alignment, bullet), apart from the level.
     pub format: Format,
+    /// The paragraph formatting in effect, inherited as for runs.
+    pub effective: Format,
     pub runs: Vec<Run>,
 }
 
@@ -214,6 +220,11 @@ pub struct Shape {
     /// The `xfrm` as written; `None` for a placeholder that takes its
     /// geometry from the layout.
     pub geometry: Option<Geometry>,
+    /// The geometry in effect: `geometry`, else the layout placeholder's,
+    /// else the master placeholder's.
+    pub effective_geometry: Option<Geometry>,
+    /// The text body's own list styles (`a:lstStyle`), by level.
+    pub list_style: Option<Levels>,
     /// The preset outline (`prstGeom` `prst`), or `custom`.
     pub outline: Option<String>,
     /// The shape's own fill and line, described canonically.
@@ -238,6 +249,8 @@ impl Shape {
             placeholder: None,
             media: false,
             geometry: None,
+            effective_geometry: None,
+            list_style: None,
             outline: None,
             fill: None,
             line: None,
@@ -262,6 +275,8 @@ pub struct Comment {
 pub struct Slide {
     /// The slide part's member name.
     pub part: String,
+    /// The layout part's member name.
+    pub layout_part: Option<String>,
     /// `sldId` `id`: stable while the slide stays in this file.
     pub id: u32,
     pub hidden: bool,
@@ -301,6 +316,66 @@ pub struct Warning {
     pub message: String,
 }
 
+/// One outline level's defaults in a list style (`a:lvlNpPr`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LevelStyle {
+    /// The level's paragraph properties (alignment, bullet).
+    pub paragraph: Format,
+    /// Its default run properties (`a:defRPr`).
+    pub run: Format,
+}
+
+/// A list style: levels 1 to 9 at indices 0 to 8.
+pub type Levels = Vec<LevelStyle>;
+
+/// The colour slots of a theme's colour scheme.
+pub const THEME_COLORS: [&str; 12] =
+    ["dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Theme {
+    pub name: Option<String>,
+    /// Latin and East Asian typefaces of the major (headings) and minor
+    /// (body) fonts.
+    pub major: Option<String>,
+    pub minor: Option<String>,
+    pub major_east_asian: Option<String>,
+    pub minor_east_asian: Option<String>,
+    /// Colours by slot, described canonically.
+    pub colors: BTreeMap<&'static str, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MasterDef {
+    pub part: String,
+    pub name: Option<Arc<str>>,
+    /// The master's shapes, placeholders among them.
+    pub shapes: Vec<Shape>,
+    /// `p:txStyles`: for titles, for bodies, and for everything else.
+    pub title_style: Levels,
+    pub body_style: Levels,
+    pub other_style: Levels,
+    pub theme: Option<Theme>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutDef {
+    pub part: String,
+    pub name: Option<Arc<str>>,
+    /// Index into [`Template::masters`].
+    pub master: Option<usize>,
+    pub shapes: Vec<Shape>,
+}
+
+/// What slides inherit from.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Template {
+    pub masters: Vec<MasterDef>,
+    pub layouts: Vec<LayoutDef>,
+    /// `p:defaultTextStyle` in `presentation.xml`.
+    pub default_style: Levels,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Presentation {
     pub format: DeckFormat,
@@ -309,6 +384,7 @@ pub struct Presentation {
     pub slides: Vec<Slide>,
     pub sections: Vec<Section>,
     pub masters: Vec<Master>,
+    pub template: Template,
     pub warnings: Vec<Warning>,
 }
 
