@@ -921,8 +921,12 @@ fn read_run_format(parser: &mut Parser<'_>, e: &Element) -> Result<Format, Error
 /// (M3).
 fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
     let mut paragraphs: Vec<Paragraph> = Vec::new();
-    // A field's kind while inside its `a:fld`.
+    // A field's kind and whether it had text, while inside its `a:fld`.
     let mut field: Option<String> = None;
+    let mut field_text = false;
+    // The depth of the open `a:p`: its own `a:pPr` sits right below it; a
+    // field's `a:pPr` is deeper.
+    let mut paragraph_depth = 0usize;
     // The current run's properties.
     let mut format = Format::new();
     let mut depth = 1usize;
@@ -933,9 +937,10 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                 "p" => {
                     budget.take()?;
                     depth += 1;
+                    paragraph_depth = depth;
                     paragraphs.push(Paragraph { level: 0, format: Format::new(), runs: Vec::new() });
                 }
-                "pPr" => {
+                "pPr" if depth == paragraph_depth => {
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
                         p.level = number(&e, "lvl").unwrap_or(0);
@@ -965,7 +970,13 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                     budget.take()?;
                     let text = parser.text_until_end(&[])?;
                     let Some(p) = paragraphs.last_mut() else { continue };
-                    let kind = field.clone().map_or(RunKind::Text, RunKind::Field);
+                    let kind = match &field {
+                        Some(kind) => {
+                            field_text = true;
+                            RunKind::Field(kind.clone())
+                        }
+                        None => RunKind::Text,
+                    };
                     p.runs.push(Run { kind, text, format: format.clone() });
                 }
                 "br" => {
@@ -978,12 +989,17 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                     depth += 1;
                     format = Format::new();
                     field = Some(e.plain_attr("type").unwrap_or("field").to_owned());
+                    field_text = false;
                 }
                 _ => depth += 1,
             },
             Event::End(name) => {
-                if name == "fld" {
-                    field = None;
+                if name == "fld"
+                    && let Some(kind) = field.take()
+                    && !field_text
+                    && let Some(p) = paragraphs.last_mut()
+                {
+                    p.runs.push(Run { kind: RunKind::Field(kind), text: String::new(), format: Format::new() });
                 }
                 depth -= 1;
                 if depth == 0 {

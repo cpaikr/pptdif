@@ -77,8 +77,8 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             if comparison.fell_back {
                 warnings.push(Warning {
                     code: "alignment_fallback".to_owned(),
-                    message: "a run of slides was too large to align fully and was paired near its diagonal; \
-                              the best pairing may have been missed"
+                    message: "slides, shapes, or paragraphs were too many to pair fully and were paired near \
+                              their positions; the best pairing may have been missed"
                         .to_owned(),
                 });
             }
@@ -252,6 +252,12 @@ fn compare_text(listing: &Listing, warnings: &[Warning]) -> String {
         s.slides_moved
     );
     for pair in &listing.slides {
+        if pair.changes.is_empty() {
+            let at = |r: &Option<diff::SlideRef>| {
+                r.as_ref().map_or_else(|| "-".to_owned(), |r| format!("slide {}", r.index))
+            };
+            let _ = writeln!(out, "{}\tslide\tsame\t{} -> {}", pair.id, at(&pair.base), at(&pair.other));
+        }
         for c in &pair.changes {
             let _ = writeln!(out, "{}", change_line(c));
         }

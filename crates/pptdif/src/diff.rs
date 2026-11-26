@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::align::{self, Item, MIN_SIMILARITY, Options, fnv, longest_increasing};
 use crate::model::{Paragraph, Presentation, Shape, ShapeKind, Slide};
+use crate::textdiff::{Marker, Marks};
 
 mod objects;
 
@@ -161,15 +162,22 @@ pub struct Change {
     pub other: Option<Side>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<Property>,
+    /// For a changed paragraph: which parts of each side's text changed, as
+    /// `[start, end)` UTF-16 ranges, when the two share enough words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marks: Option<Marks>,
 }
 
 impl Change {
     fn new(kind: Kind, status: Status, base: Option<Side>, other: Option<Side>) -> Self {
-        Self { id: String::new(), kind, status, base, other, properties: Vec::new() }
+        Self { id: String::new(), kind, status, base, other, properties: Vec::new(), marks: None }
     }
 
     fn mirrored(mut self) -> Self {
         std::mem::swap(&mut self.base, &mut self.other);
+        if let Some(m) = &mut self.marks {
+            std::mem::swap(&mut m.base, &mut m.other);
+        }
         self.status = self.status.mirrored();
         for p in &mut self.properties {
             std::mem::swap(&mut p.base, &mut p.other);
@@ -242,8 +250,8 @@ pub struct Comparison {
     pub slides: Vec<SlidePair>,
     /// Changes to the deck itself (sections).
     pub objects: Vec<ObjectChange>,
-    /// The slide alignment exceeded its work bounds somewhere and may have
-    /// missed the best pairing.
+    /// A slide, shape, or paragraph pairing exceeded its work bounds
+    /// somewhere and may have missed the best pairing.
     pub fell_back: bool,
 }
 
@@ -355,6 +363,18 @@ fn items_hash(items: &[Item]) -> u64 {
     fnv(&refs)
 }
 
+/// What every pairing in one comparison shares: whether any of them ran
+/// out of work and settled for less, and the budget for text marks.
+struct Work {
+    fell_back: bool,
+    marker: Marker,
+}
+
+/// The most item pairs an order-free pairing scores in full. Beyond it,
+/// each item is scored only against items near its own position, and the
+/// comparison says it fell back.
+const MAX_PAIRING_WORK: usize = 4_000_000;
+
 // ---------------------------------------------------------------------------
 // Slide pairing
 
@@ -365,7 +385,7 @@ struct SlideMatch {
     fell_back: bool,
 }
 
-fn match_slides(base: &[Item], other: &[Item], mode: AlignMode) -> SlideMatch {
+fn match_slides(base: &[Item], other: &[Item], mode: AlignMode, work: &mut Work) -> SlideMatch {
     if mode == AlignMode::Position {
         let a = align::Alignment::positional(base.len(), other.len());
         return SlideMatch { pairs: a.pairs, moved: HashSet::new(), fell_back: false };
@@ -382,7 +402,22 @@ fn match_slides(base: &[Item], other: &[Item], mode: AlignMode) -> SlideMatch {
     let used_b: HashSet<usize> = pairs.iter().map(|p| p.1).collect();
     let free_a: Vec<usize> = (0..a.len()).filter(|i| !used_a.contains(i)).collect();
     let free_b: Vec<usize> = (0..b.len()).filter(|j| !used_b.contains(j)).collect();
-    pairs.extend(best_first(&free_a, &free_b, |i, j| align::similarity(&a[i], &b[j])));
+    pairs.extend(best_first(&free_a, &free_b, |i, j| align::similarity(&a[i], &b[j]), work));
+
+    // Slides with no title and no content (blank, or holding only what is
+    // not compared) say nothing to pair on but their layout: those left on
+    // both sides pair in order, layout for layout.
+    let used_a: HashSet<usize> = pairs.iter().map(|p| p.0).collect();
+    let used_b: HashSet<usize> = pairs.iter().map(|p| p.1).collect();
+    let empty = |it: &Item| it.key.is_none() && it.tokens.is_empty();
+    let blank_b: Vec<usize> = (0..b.len()).filter(|j| !used_b.contains(j) && empty(&b[*j])).collect();
+    let mut next = 0;
+    for i in (0..a.len()).filter(|i| !used_a.contains(i) && empty(&a[*i])) {
+        if let Some(k) = blank_b[next..].iter().position(|&j| b[j].shape == a[i].shape) {
+            pairs.push((i, blank_b[next + k]));
+            next += k + 1;
+        }
+    }
 
     // Pairs outside the longest run in order moved. Which of two crossing
     // pairs that is depends on the orientation, so it is settled before the
@@ -403,11 +438,22 @@ fn match_slides(base: &[Item], other: &[Item], mode: AlignMode) -> SlideMatch {
 }
 
 /// Pairs items greedily by similarity (at least [`MIN_SIMILARITY`]), the
-/// most similar first, ties by index.
-fn best_first(a: &[usize], b: &[usize], sim: impl Fn(usize, usize) -> f64) -> Vec<(usize, usize)> {
+/// most similar first, ties by index. Within [`MAX_PAIRING_WORK`] every
+/// pair is scored; beyond it each item only against those near its own
+/// position in the list, and `work` records the fallback.
+fn best_first(a: &[usize], b: &[usize], sim: impl Fn(usize, usize) -> f64, work: &mut Work) -> Vec<(usize, usize)> {
+    let band = if a.len().saturating_mul(b.len()) > MAX_PAIRING_WORK {
+        work.fell_back = true;
+        MAX_PAIRING_WORK / a.len().max(b.len()).max(1) / 2
+    } else {
+        usize::MAX
+    };
     let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
-    for &i in a {
-        for &j in b {
+    for (x, &i) in a.iter().enumerate() {
+        // Positions scale, so lists of different lengths keep their diagonal.
+        let centre = x * b.len() / a.len().max(1);
+        let (lo, hi) = (centre.saturating_sub(band), centre.saturating_add(band).min(b.len().saturating_sub(1)));
+        for &j in b.get(lo..=hi).unwrap_or_default() {
             let s = sim(i, j);
             if s >= MIN_SIMILARITY {
                 candidates.push((s, i, j));
@@ -462,7 +508,7 @@ fn shape_item(shape: &Shape) -> Item {
 /// Pairs shapes in steps, each over what is still unpaired, and each only
 /// where the key is unique on both sides: placeholder type and index; id
 /// and name; name; then content similarity among shapes of one kind.
-pub fn pair_shapes(a: &[&Shape], b: &[&Shape]) -> Vec<(usize, usize)> {
+fn pair_shapes(a: &[&Shape], b: &[&Shape], work: &mut Work) -> Vec<(usize, usize)> {
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     let (mut used_a, mut used_b) = (HashSet::new(), HashSet::new());
     let by_key = |key: &dyn Fn(&Shape) -> Option<String>,
@@ -508,9 +554,18 @@ pub fn pair_shapes(a: &[&Shape], b: &[&Shape]) -> Vec<(usize, usize)> {
     let free_b: Vec<usize> = (0..b.len()).filter(|j| !used_b.contains(j)).collect();
     let items_a: Vec<Item> = a.iter().map(|s| shape_item(s)).collect();
     let items_b: Vec<Item> = b.iter().map(|s| shape_item(s)).collect();
-    pairs.extend(best_first(&free_a, &free_b, |i, j| {
-        if a[i].kind == b[j].kind { align::similarity(&items_a[i], &items_b[j]) } else { 0.0 }
-    }));
+    // A shape with nothing in it (only its kind token) has nothing to be
+    // recognised by once its identity failed to match: it stays unpaired.
+    let telling = |it: &Item| it.tokens.len() > 1;
+    pairs.extend(best_first(
+        &free_a,
+        &free_b,
+        |i, j| {
+            let (x, y) = (&items_a[i], &items_b[j]);
+            if a[i].kind == b[j].kind && telling(x) && telling(y) { align::similarity(x, y) } else { 0.0 }
+        },
+        work,
+    ));
     pairs.sort_unstable();
     pairs
 }
@@ -523,15 +578,18 @@ pub fn pair_shapes(a: &[&Shape], b: &[&Shape]) -> Vec<(usize, usize)> {
 /// `Same` for a pair whose text did not change.
 /// Empty paragraphs are left out: a blank line added or removed is not
 /// reported.
-pub(super) fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph]) -> Vec<(Status, Option<usize>, Option<usize>)> {
+fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph], work: &mut Work) -> Vec<(Status, Option<usize>, Option<usize>)> {
     let keep = |ps: &[Paragraph]| -> Vec<usize> {
         ps.iter().enumerate().filter(|(_, p)| !p.compared().trim().is_empty()).map(|(i, _)| i).collect()
     };
     let (ka, kb) = (keep(a), keep(b));
+    // The whole text is the label, so an unchanged paragraph anchors as
+    // itself; the words let an edited one still pair.
     let item = |p: &Paragraph| {
-        let mut tokens: Vec<u64> = words(&p.compared()).map(|w| hash(&w)).collect();
+        let text = p.compared();
+        let mut tokens: Vec<u64> = words(&text).map(|w| hash(&w)).collect();
         tokens.sort_unstable();
-        Item { key: None, tokens, shape: 0 }
+        Item { key: Some(normalize(&text)), tokens, shape: 0 }
     };
     let ia: Vec<Item> = ka.iter().map(|&i| item(&a[i])).collect();
     let ib: Vec<Item> = kb.iter().map(|&j| item(&b[j])).collect();
@@ -554,12 +612,7 @@ pub(super) fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph]) -> Vec<(Status, 
     // between aligned paragraphs, those pair as one edit, without crossing.
     let free_a: Vec<usize> = (0..ka.len()).filter(|i| !used_a.contains(i)).collect();
     let free_b: Vec<usize> = (0..kb.len()).filter(|j| !used_b.contains(j)).collect();
-    let same_gap = |i: usize, j: usize| !alignment.pairs.iter().any(|&(p, q)| (p < i) != (q < j));
-    let mut edits = best_first(&free_a, &free_b, |i, j| if same_gap(i, j) { containment(&ia[i], &ib[j]) } else { 0.0 });
-    edits.sort_unstable();
-    let order: Vec<usize> = edits.iter().map(|p| p.1).collect();
-    for k in longest_increasing(&order) {
-        let (i, j) = edits[k];
+    for (i, j) in ordered_pairs(&free_a, &free_b, &alignment.pairs, |i, j| containment(&ia[i], &ib[j]), work) {
         used_a.insert(i);
         used_b.insert(j);
         out.push((Status::Changed, Some(ka[i]), Some(kb[j])));
@@ -567,6 +620,66 @@ pub(super) fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph]) -> Vec<(Status, 
     out.extend((0..ka.len()).filter(|i| !used_a.contains(i)).map(|i| (Status::OnlyBase, Some(ka[i]), None)));
     out.extend((0..kb.len()).filter(|j| !used_b.contains(j)).map(|j| (Status::OnlyOther, None, Some(kb[j]))));
     out.sort_by_key(|(_, i, j)| (i.unwrap_or(usize::MAX), j.unwrap_or(usize::MAX)));
+    out
+}
+
+/// Pairs left-over items within each gap between aligned `pairs`, never
+/// crossing, for the greatest total score (at least [`MIN_SIMILARITY`]
+/// each): a weighted longest common subsequence per gap. A gap beyond
+/// [`MAX_PAIRING_WORK`] is left unpaired and `work` records the fallback.
+// Dynamic-programming indices (n, m, p, q, s) read best short here.
+#[allow(clippy::many_single_char_names)]
+fn ordered_pairs(
+    free_a: &[usize],
+    free_b: &[usize],
+    pairs: &[(usize, usize)],
+    score: impl Fn(usize, usize) -> f64,
+    work: &mut Work,
+) -> Vec<(usize, usize)> {
+    // An item's gap is how many aligned pairs come before it.
+    let gap_a = |i: usize| pairs.iter().filter(|p| p.0 < i).count();
+    let gap_b = |j: usize| pairs.iter().filter(|p| p.1 < j).count();
+    let mut gaps: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    for &i in free_a {
+        gaps.entry(gap_a(i)).or_default().0.push(i);
+    }
+    for &j in free_b {
+        gaps.entry(gap_b(j)).or_default().1.push(j);
+    }
+    let mut keys: Vec<usize> = gaps.keys().copied().collect();
+    keys.sort_unstable();
+    let mut out = Vec::new();
+    for key in keys {
+        let (xs, ys) = &gaps[&key];
+        if xs.is_empty() || ys.is_empty() {
+            continue;
+        }
+        if xs.len().saturating_mul(ys.len()) > MAX_PAIRING_WORK {
+            work.fell_back = true;
+            continue;
+        }
+        let (n, m) = (xs.len(), ys.len());
+        let mut best = vec![vec![0.0f64; m + 1]; n + 1];
+        for p in (0..n).rev() {
+            for q in (0..m).rev() {
+                let s = score(xs[p], ys[q]);
+                let take = if s >= MIN_SIMILARITY { s + best[p + 1][q + 1] } else { f64::NEG_INFINITY };
+                best[p][q] = take.max(best[p + 1][q]).max(best[p][q + 1]);
+            }
+        }
+        let (mut p, mut q) = (0, 0);
+        while p < n && q < m {
+            let s = score(xs[p], ys[q]);
+            if s >= MIN_SIMILARITY && (s + best[p + 1][q + 1] - best[p][q]).abs() < 1e-12 {
+                out.push((xs[p], ys[q]));
+                (p, q) = (p + 1, q + 1);
+            } else if (best[p + 1][q] - best[p][q]).abs() < 1e-12 {
+                p += 1;
+            } else {
+                q += 1;
+            }
+        }
+    }
     out
 }
 
@@ -595,6 +708,7 @@ fn paragraph_changes(
     kind: Kind,
     a: (&[Paragraph], usize, Option<&ShapeRef>),
     b: (&[Paragraph], usize, Option<&ShapeRef>),
+    work: &mut Work,
 ) -> Vec<Change> {
     let side = |(ps, slide, shape): (&[Paragraph], usize, Option<&ShapeRef>), i: usize| Side {
         slide,
@@ -604,11 +718,18 @@ fn paragraph_changes(
         row: None,
         column: None,
     };
-    diff_paragraphs(a.0, b.0)
-        .into_iter()
-        .filter(|(status, _, _)| *status != Status::Same)
-        .map(|(status, i, j)| Change::new(kind, status, i.map(|i| side(a, i)), j.map(|j| side(b, j))))
-        .collect()
+    let mut changes = Vec::new();
+    for (status, i, j) in diff_paragraphs(a.0, b.0, work) {
+        if status == Status::Same {
+            continue;
+        }
+        let mut c = Change::new(kind, status, i.map(|i| side(a, i)), j.map(|j| side(b, j)));
+        if let (Status::Changed, Some(x), Some(y)) = (status, &c.base, &c.other) {
+            c.marks = work.marker.marks(x.text.as_deref().unwrap_or_default(), y.text.as_deref().unwrap_or_default());
+        }
+        changes.push(c);
+    }
+    changes
 }
 
 // ---------------------------------------------------------------------------
@@ -626,15 +747,15 @@ fn fingerprint(slide: &Slide) -> u64 {
     hash(&described)
 }
 
-fn compare_slide(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64) -> Vec<Change> {
+fn compare_slide(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
     // A fixed orientation, as for the slides.
     if fingerprint(a) > fingerprint(b) {
-        return compare_slide_oriented(b, bi, a, ai, tolerance).into_iter().map(Change::mirrored).collect();
+        return compare_slide_oriented(b, bi, a, ai, tolerance, work).into_iter().map(Change::mirrored).collect();
     }
-    compare_slide_oriented(a, ai, b, bi, tolerance)
+    compare_slide_oriented(a, ai, b, bi, tolerance, work)
 }
 
-fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64) -> Vec<Change> {
+fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
     let mut changes = Vec::new();
     let slide_side = |slide: usize| Side { slide, shape: None, paragraph: None, text: None, row: None, column: None };
 
@@ -653,7 +774,7 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
     }
 
     let (la, lb) = (leaves(a), leaves(b));
-    let pairs = pair_shapes(&la, &lb);
+    let pairs = pair_shapes(&la, &lb, work);
     let (pa, pb): (HashSet<usize>, HashSet<usize>) =
         (pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect());
     let shape_side = |slide: usize, shape: &Shape, k: usize| Side {
@@ -681,6 +802,9 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
                 other: serde_json::to_value(sb.kind).unwrap_or(Value::Null),
             });
         }
+        if sa.hidden != sb.hidden {
+            props.push(Property { name: "hidden", base: Value::Bool(sa.hidden), other: Value::Bool(sb.hidden) });
+        }
         if sa.name != sb.name {
             props.push(Property {
                 name: "name",
@@ -702,14 +826,14 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
             changes.push(c);
         }
         let (ta, tb) = (sa.text.as_deref().unwrap_or_default(), sb.text.as_deref().unwrap_or_default());
-        changes.extend(paragraph_changes(Kind::Text, (ta, ai, Some(&ra)), (tb, bi, Some(&rb))));
-        changes.extend(objects::shape_changes(sa, (ai, &ra), sb, (bi, &rb), tolerance));
+        changes.extend(paragraph_changes(Kind::Text, (ta, ai, Some(&ra)), (tb, bi, Some(&rb)), work));
+        changes.extend(objects::shape_changes(sa, (ai, &ra), sb, (bi, &rb), tolerance, work));
     }
     changes.extend(objects::arrangement_changes(&la, &group_paths(a), ai, &lb, &group_paths(b), bi, &pairs));
 
     let (na, nb) = (a.notes.as_deref().unwrap_or_default(), b.notes.as_deref().unwrap_or_default());
-    changes.extend(paragraph_changes(Kind::Notes, (na, ai, None), (nb, bi, None)));
-    changes.extend(objects::comment_changes(&a.comments, ai, &b.comments, bi));
+    changes.extend(paragraph_changes(Kind::Notes, (na, ai, None), (nb, bi, None), work));
+    changes.extend(objects::comment_changes(&a.comments, ai, &b.comments, bi, work));
     changes
 }
 
@@ -774,7 +898,8 @@ pub fn compare(
 ) -> Comparison {
     let ia: Vec<Item> = base.slides.iter().map(slide_item).collect();
     let ib: Vec<Item> = other.slides.iter().map(slide_item).collect();
-    let matched = match_slides(&ia, &ib, options.align);
+    let mut work = Work { fell_back: false, marker: Marker::new() };
+    let matched = match_slides(&ia, &ib, options.align, &mut work);
     let by_base: HashMap<usize, usize> = matched.pairs.iter().copied().collect();
     let paired_other: HashSet<usize> = matched.pairs.iter().map(|p| p.1).collect();
 
@@ -785,7 +910,7 @@ pub fn compare(
             {
                 let b = &other.slides[j];
                 let moved = matched.moved.contains(&(i, j));
-                let changes = compare_slide(a, i + 1, b, j + 1, options.tolerance);
+                let changes = compare_slide(a, i + 1, b, j + 1, options.tolerance, &mut work);
                 let status = if moved {
                     Status::Moved
                 } else if changes.is_empty() {
@@ -838,7 +963,7 @@ pub fn compare(
         other: DeckRef { file: other_file.to_owned(), slides: other.slides.len() },
         slides,
         objects,
-        fell_back: matched.fell_back,
+        fell_back: matched.fell_back || work.fell_back,
     }
 }
 
@@ -923,7 +1048,8 @@ pub fn listing(comparison: &Comparison, filter: &Filter) -> Listing {
         }
         let wanted: Vec<&Change> =
             pair.changes.iter().filter(|c| filter.kinds.is_empty() || filter.kinds.contains(&c.kind)).collect();
-        if wanted.is_empty() && !(filter.all && filter.kinds.is_empty()) {
+        // `--all` lists slides with no changes at all, whatever the kinds.
+        if wanted.is_empty() && !(filter.all && pair.changes.is_empty()) {
             continue;
         }
         let mut kept = Vec::new();
@@ -935,7 +1061,14 @@ pub fn listing(comparison: &Comparison, filter: &Filter) -> Listing {
                 *omitted.entry(pair.id.clone()).or_default().entry(c.kind.as_str()).or_default() += 1;
             }
         }
-        slides.push(SlidePair { changes: kept, ..pair.clone() });
+        slides.push(SlidePair {
+            id: pair.id.clone(),
+            status: pair.status,
+            base: pair.base.clone(),
+            other: pair.other.clone(),
+            moved: pair.moved,
+            changes: kept,
+        });
     }
     let objects: Vec<ObjectChange> = if filter.slide.is_some() {
         Vec::new()

@@ -10,7 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    Change, Kind, ObjectChange, Property, ShapeRef, Side, Status, best_first, containment, diff_paragraphs, hash,
+    Change, Kind, ObjectChange, Property, ShapeRef, Side, Status, Work, best_first, containment, diff_paragraphs, hash,
     normalize, words,
 };
 use crate::align::{self, Item, Options, longest_increasing};
@@ -64,6 +64,7 @@ pub(super) fn shape_changes(
     sb: &Shape,
     (bi, rb): (usize, &ShapeRef),
     tolerance: i64,
+    work: &mut Work,
 ) -> Vec<Change> {
     let mut changes = Vec::new();
     // A placeholder with no `xfrm` sits where its layout puts it; that is
@@ -86,7 +87,7 @@ pub(super) fn shape_changes(
         changes.push(changed(Kind::Format, side(ai, ra), side(bi, rb), props));
     }
     let (ta, tb) = (sa.text.as_deref().unwrap_or_default(), sb.text.as_deref().unwrap_or_default());
-    changes.extend(text_format_changes(ta, (ai, ra), tb, (bi, rb)));
+    changes.extend(text_format_changes(ta, (ai, ra), tb, (bi, rb), work));
     if let (Some(ia), Some(ib)) = (&sa.image, &sb.image) {
         let mut props = Vec::new();
         if ia.hash != ib.hash {
@@ -122,7 +123,8 @@ fn char_formats(p: &Paragraph) -> Vec<(char, &Format)> {
         match &run.kind {
             RunKind::Text => out.extend(run.text.chars().map(|c| (c, &run.format))),
             RunKind::Field(kind) => {
-                out.extend(format!("{{{kind}}}").chars().map(|c| (c, &run.format)));
+                // As `Paragraph::compared` writes a field.
+                out.extend(format!("\0{kind}\0").chars().map(|c| (c, &run.format)));
             }
             RunKind::Break => out.push(('\n', &*NONE)),
         }
@@ -152,9 +154,10 @@ fn text_format_changes(
     (ai, ra): (usize, &ShapeRef),
     b: &[Paragraph],
     (bi, rb): (usize, &ShapeRef),
+    work: &mut Work,
 ) -> Vec<Change> {
     let mut changes = Vec::new();
-    for (status, i, j) in diff_paragraphs(a, b) {
+    for (status, i, j) in diff_paragraphs(a, b, work) {
         let (Status::Same, Some(i), Some(j)) = (status, i, j) else { continue };
         let (pa, pb) = (&a[i], &b[j]);
         let at = |slide, r: &ShapeRef, n: usize, text: String| Side {
@@ -424,7 +427,7 @@ fn comment_text(c: &Comment) -> String {
 /// comment reports a changed author or replies.
 // Two sides (a, b), their indices (i, j), and their comments (x, y).
 #[allow(clippy::many_single_char_names)]
-pub(super) fn comment_changes(a: &[Comment], ai: usize, b: &[Comment], bi: usize) -> Vec<Change> {
+pub(super) fn comment_changes(a: &[Comment], ai: usize, b: &[Comment], bi: usize, work: &mut Work) -> Vec<Change> {
     let item = |c: &Comment| {
         let mut tokens: Vec<u64> = words(&c.text).map(|w| hash(&w)).collect();
         tokens.sort_unstable();
@@ -442,9 +445,12 @@ pub(super) fn comment_changes(a: &[Comment], ai: usize, b: &[Comment], bi: usize
     let used_a: HashSet<usize> = pairs.iter().map(|p| p.0).collect();
     let free_a: Vec<usize> = (0..a.len()).filter(|i| !used_a.contains(i)).collect();
     let free_b: Vec<usize> = (0..b.len()).filter(|j| !used_b.contains(j)).collect();
-    pairs.extend(best_first(&free_a, &free_b, |i, j| {
-        containment(&ia[i], &ib[j]).min(align::similarity(&ia[i], &ib[j]) * 2.0)
-    }));
+    pairs.extend(best_first(
+        &free_a,
+        &free_b,
+        |i, j| containment(&ia[i], &ib[j]).min(align::similarity(&ia[i], &ib[j]) * 2.0),
+        work,
+    ));
     pairs.sort_unstable();
     let (used_a, used_b): (HashSet<usize>, HashSet<usize>) =
         (pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect());

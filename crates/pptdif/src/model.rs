@@ -113,16 +113,18 @@ impl Paragraph {
     }
 
     /// The text as compared: a field by its kind, since PowerPoint rewrites
-    /// its text (renumbering every footer after an inserted slide).
+    /// its text (renumbering every footer after an inserted slide). The
+    /// kind sits between NUL characters, which XML text cannot hold, so no
+    /// typed text compares equal to a field.
     pub fn compared(&self) -> String {
         let mut out = String::new();
         for run in &self.runs {
             match &run.kind {
                 RunKind::Text => out.push_str(&run.text),
                 RunKind::Field(kind) => {
-                    out.push('{');
+                    out.push('\0');
                     out.push_str(kind);
-                    out.push('}');
+                    out.push('\0');
                 }
                 RunKind::Break => out.push('\n'),
             }
