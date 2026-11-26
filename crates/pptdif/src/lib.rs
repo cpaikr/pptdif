@@ -11,6 +11,7 @@ mod error;
 pub mod model;
 mod package;
 pub mod reader;
+mod textdiff;
 pub mod views;
 mod xml;
 
