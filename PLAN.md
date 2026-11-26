@@ -14,15 +14,21 @@ is the presentation model, shape pairing, text-style inheritance, and a
 report that shows slides rather than grids.
 
 Status:
-- Nothing is built. This plan was drafted on 2026-11-26 from a reading of
-  xldif at `8b272fd`.
-- Next action: M0, starting with the survey of existing tools.
+- The plan was drafted on 2026-11-26 from a reading of xldif at `8b272fd`.
+- M0 is done: the survey (below), the workspace with the copied xldif
+  modules, the fixture builder, the PowerPoint-saved fixture and its
+  script, python-pptx parity, `scripts/check.py`, and CI.
+- M1 has started: the reader takes slide order, sections, masters and
+  layouts, and each slide's shape tree (kinds, ids, names, placeholders,
+  groups), notes, and comments; `inspect` reports them. Parity with
+  python-pptx is clean on the public fixtures.
+- Next action: text bodies, then `text` and `compare` ([TODO.md](TODO.md)).
 
 ## Decisions
 
 | Decision | Choice | Why |
 |---|---|---|
-| Build or reuse | Build, unless the M0 survey finds a tool that already pairs slides by content and reports text and formatting changes as data | Known so far: PowerPoint's Review > Compare is interactive, merges revisions into the open file, and gives no machine-readable result; python-pptx reads decks but compares nothing and does not resolve inherited formatting. The survey has not been done |
+| Build or reuse | Build. Study sugatoray/pptxdiff (Apache-2.0) as prior art for slide similarity and coverage | The survey (2026-11-26) found no tool that pairs slides by content and gives agents a change list without Office or a browser. sugatoray/pptxdiff comes closest: content-aligned slides, word marks, formatting and geometry, but it is an early single-author browser app whose headless mode drives the page through Playwright and whose JSON is shaped for its UI. Aspose.Slides answers only equal or not; GroupDocs, Draftable, and Litera produce redlines; PowerPoint's own Compare is interactive and being retired; the git-oriented tools compare text or rendered images only |
 | Relation to xldif | Copy `package`, `xml`, `error`, `align`, and `textdiff` from xldif `8b272fd`, each with a header naming its origin. No path or git dependency on xldif | A `../xldif` path breaks CI and ties releases together. `align.rs` (`Item { key, tokens, shape }`) has nothing Excel-specific in it. Extract a shared crate once a fix has had to land in both copies |
 | Language and layout | Rust workspace: `crates/pptdif` (library, no process I/O), `crates/pptdif-cli` (clap, process contract), `crates/pptdif-fixtures` (test decks) | Same boundaries, lints (clippy pedantic, `unsafe_code = "forbid"`), and release profile as xldif |
 | Presentation reader | Own read-only OOXML reader on `zip` + `quick-xml` | A diff needs exact control over placeholder and style inheritance and over hostile-input bounds; no Rust library offers both |
@@ -32,7 +38,7 @@ Status:
 | Text first | v1 compares text, structure, and formatting written on the text itself. Effective (inherited) formatting comes in M3 | Most deck edits are wording. The inheritance chain is the largest correctness risk and should not block a useful tool |
 | Computed content | Field text (slide numbers, dates), autofit's `fontScale` and `lnSpcReduction`, and other values PowerPoint recomputes are not reported as edits; they are counted apart, as xldif counts recalculated values | Inserting one slide renumbers every later footer; that is noise, not an edit |
 | JSON style | camelCase fields and the shared status words (`same`, `changed`, `onlyBase`, `onlyOther`, plus `moved`) | One vocabulary across the user's tools |
-| Fixtures | Synthetic decks assembled from hand-written XML parts, plus PowerPoint-saved decks with invented content made by a COM script | No Rust writer comparable to `rust_xlsxwriter` is known (confirm in M0). Inheritance, modern comments, and autofit values only come from PowerPoint |
+| Fixtures | Synthetic decks assembled from hand-written XML parts, plus PowerPoint-saved decks with invented content made by a COM script | Hand-written parts give exact control over what the reader sees, including shapes no writer produces. `ppt-rs` (Apache-2.0) is the closest Rust writer; revisit it if fixture XML grows unwieldy. Inheritance, modern comments, and autofit values only come from PowerPoint. The COM script needs a document window: charts and SmartArt fail without one |
 | Confidentiality | Same rule as xldif: real decks only under git-ignored `fixtures/private/`. Their contents, file names, and derived values never appear in tests, docs, or commits | Real inputs are client and audit material |
 
 ## Architecture
@@ -90,8 +96,9 @@ input and exporting slide images.
   values (`c:strCache`, `c:numCache`). The embedded workbook is not read;
   the skill may hand it to xldif.
 - **Not compared (v1), named in the warning:** SmartArt (`dgm`), OLE
-  objects, media, ink, animations (`p:timing`), custom shows, VBA, and
-  extension lists.
+  objects, media, ink, other graphic frames, animations (`p:timing`),
+  custom shows, and VBA. Extension lists are not named: PowerPoint writes
+  them in every deck, and the ones that matter (sections) are read.
 
 ## Alignment
 
