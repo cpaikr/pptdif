@@ -415,13 +415,15 @@ fn read_theme(text: &str, part: &str) -> Result<Theme, Error> {
                 }
                 "majorFont" => font = Some(true),
                 "minorFont" => font = Some(false),
-                "latin" | "ea" if font.is_some() => {
+                "latin" | "ea" | "cs" if font.is_some() => {
                     let face = e.plain_attr("typeface").filter(|f| !f.is_empty()).map(str::to_owned);
                     match (font, e.name.as_str()) {
                         (Some(true), "latin") => theme.major = face,
                         (Some(false), "latin") => theme.minor = face,
-                        (Some(true), _) => theme.major_east_asian = face,
-                        _ => theme.minor_east_asian = face,
+                        (Some(true), "ea") => theme.major_east_asian = face,
+                        (Some(false), "ea") => theme.minor_east_asian = face,
+                        (Some(true), _) => theme.major_complex = face,
+                        _ => theme.minor_complex = face,
                     }
                 }
                 _ => {}
@@ -442,8 +444,14 @@ fn read_theme(text: &str, part: &str) -> Result<Theme, Error> {
 /// run properties.
 fn read_list_style(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Levels, Error> {
     let mut levels: Levels = vec![LevelStyle::default(); 9];
+    // `a:defPPr` underlies every level.
+    let mut base: Option<LevelStyle> = None;
     loop {
         match parser.next()? {
+            Event::Start(e) if e.name == "defPPr" => {
+                budget.take()?;
+                base = Some(read_level(parser, &e)?);
+            }
             Event::Start(e) => {
                 let level = e
                     .name
@@ -459,7 +467,19 @@ fn read_list_style(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Level
                     None => parser.skip_element()?,
                 }
             }
-            Event::End(_) | Event::Eof => return Ok(levels),
+            Event::End(_) | Event::Eof => {
+                if let Some(base) = base {
+                    for level in &mut levels {
+                        for (k, v) in &base.paragraph {
+                            level.paragraph.entry(k).or_insert_with(|| v.clone());
+                        }
+                        for (k, v) in &base.run {
+                            level.run.entry(k).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+                return Ok(levels);
+            }
             Event::Text(_) => {}
         }
     }
@@ -468,13 +488,24 @@ fn read_list_style(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Level
 /// One level of a list style (`a:lvlNpPr`), its start tag just read.
 fn read_level(parser: &mut Parser<'_>, e: &Element) -> Result<LevelStyle, Error> {
     let mut level = LevelStyle::default();
-    if let Some(a) = e.plain_attr("algn") {
-        level.paragraph.insert("align", a.to_owned());
+    for (attr, key) in [("algn", "align"), ("marL", "marginLeft"), ("indent", "indent"), ("rtl", "rtl")] {
+        if let Some(v) = e.plain_attr(attr) {
+            level.paragraph.insert(key, v.to_owned());
+        }
     }
     loop {
         match parser.next()? {
             Event::Start(c) => match c.name.as_str() {
                 "defRPr" => level.run = read_run_format(parser, &c)?,
+                "lnSpc" | "spcBef" | "spcAft" => {
+                    let key = match c.name.as_str() {
+                        "lnSpc" => "lineSpacing",
+                        "spcBef" => "spaceBefore",
+                        _ => "spaceAfter",
+                    };
+                    let d = parser.describe_rest()?;
+                    level.paragraph.insert(key, d);
+                }
                 "buNone" | "buChar" | "buAutoNum" | "buBlip" => {
                     level.paragraph.insert("bullet", bullet(&c));
                     parser.skip_element()?;

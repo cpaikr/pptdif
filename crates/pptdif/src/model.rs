@@ -341,6 +341,8 @@ pub struct Theme {
     pub minor: Option<String>,
     pub major_east_asian: Option<String>,
     pub minor_east_asian: Option<String>,
+    pub major_complex: Option<String>,
+    pub minor_complex: Option<String>,
     /// Colours by slot, described canonically.
     pub colors: BTreeMap<&'static str, String>,
 }

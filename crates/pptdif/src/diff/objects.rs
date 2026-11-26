@@ -73,7 +73,7 @@ pub(super) fn shape_changes(
     // Geometry the slide writes differently, compared as it takes effect. A
     // placeholder that writes none on either side sits where its layout
     // puts it, and a layout change is reported once, on the layout.
-    if sa.geometry != sb.geometry
+    if (sa.geometry != sb.geometry || work.inherited)
         && let (Some(ga), Some(gb)) = (&sa.effective_geometry, &sb.effective_geometry)
     {
         let props = geometry_properties(ga, gb, tolerance);
@@ -194,7 +194,7 @@ fn text_format_changes(
             ..side(slide, r)
         };
         let written = |p: &Paragraph, s| local(&p.format, s, p.level, |l| &l.paragraph);
-        let mut props = if written(pa, sa) == written(pb, sb) {
+        let mut props = if written(pa, sa) == written(pb, sb) && !work.inherited {
             Vec::new()
         } else {
             format_differences(&pa.effective, &pb.effective)
@@ -217,7 +217,7 @@ fn text_format_changes(
             }
         };
         for ((c, wa, ea), (_, wb, eb)) in ca.iter().zip(&cb) {
-            let diff = if wa == wb { Vec::new() } else { format_differences(ea, eb) };
+            let diff = if wa == wb && !work.inherited { Vec::new() } else { format_differences(ea, eb) };
             match &mut stretch {
                 Some((text, props)) if *props == diff => text.push(*c),
                 _ => {
@@ -690,6 +690,18 @@ fn placeholder_json(s: &Shape) -> Value {
     json!({"placeholder": key, "name": s.name, "geometry": g})
 }
 
+type Keyed = (Option<(String, u32)>, Shape);
+
+/// How many placeholders before `i` share its key.
+fn nth(v: &[Keyed], i: usize) -> usize {
+    v[..i].iter().filter(|(l, _)| *l == v[i].0).count()
+}
+
+/// The `n`-th placeholder with key `k`.
+fn find<'a>(v: &'a [Keyed], k: Option<&(String, u32)>, n: usize) -> Option<&'a Shape> {
+    v.iter().filter(|(l, _)| l.as_ref() == k).nth(n).map(|(_, s)| s)
+}
+
 /// Placeholders of two template parts paired by type and index; each pair
 /// whose geometry or list style differs, and each one on one side only.
 fn placeholder_properties(a: &[Shape], b: &[Shape]) -> Vec<Property> {
@@ -698,10 +710,12 @@ fn placeholder_properties(a: &[Shape], b: &[Shape]) -> Vec<Property> {
         shapes.iter().flat_map(Shape::walk).filter(|s| s.placeholder.is_some()).map(|s| (key(s), s.clone())).collect()
     };
     let (pa, pb) = (of(a), of(b));
+    // The k-th placeholder of a type and index pairs with the k-th, so
+    // repeated keys pair the same way whichever side is the base.
     let mut props = Vec::new();
-    for (k, x) in &pa {
-        match pb.iter().find(|(l, _)| l == k) {
-            Some((_, y)) => {
+    for (i, (k, x)) in pa.iter().enumerate() {
+        match find(&pb, k.as_ref(), nth(&pa, i)) {
+            Some(y) => {
                 let styles = |s: &Shape| s.list_style.clone().unwrap_or_default();
                 let levels = differing_levels(&styles(x), &styles(y));
                 if x.geometry != y.geometry || !levels.is_empty() {
@@ -716,8 +730,8 @@ fn placeholder_properties(a: &[Shape], b: &[Shape]) -> Vec<Property> {
             None => props.push(Property { name: "placeholder", base: placeholder_json(x), other: Value::Null }),
         }
     }
-    for (k, y) in &pb {
-        if !pa.iter().any(|(l, _)| l == k) {
+    for (j, (k, y)) in pb.iter().enumerate() {
+        if find(&pa, k.as_ref(), nth(&pb, j)).is_none() {
             props.push(Property { name: "placeholder", base: Value::Null, other: placeholder_json(y) });
         }
     }
@@ -759,8 +773,19 @@ fn object(
     ObjectChange { id, kind, status, base: base.map(|s| json!(s)), other: other.map(|s| json!(s)), properties }
 }
 
+/// A template part's shapes other than placeholders (a logo, a band), as a
+/// fingerprint and a count: they show on every slide.
+fn decoration(shapes: &[Shape]) -> (u64, usize) {
+    let others: Vec<&Shape> = shapes.iter().filter(|s| s.placeholder.is_none()).collect();
+    (super::hash(&format!("{others:?}")), others.len())
+}
+
 fn master_properties(a: &MasterDef, b: &MasterDef) -> Vec<Property> {
     let mut props = placeholder_properties(&a.shapes, &b.shapes);
+    let (da, db) = (decoration(&a.shapes), decoration(&b.shapes));
+    if da.0 != db.0 {
+        props.push(Property { name: "shapes", base: json!(da.1), other: json!(db.1) });
+    }
     for (name, x, y) in [
         ("titleStyle", &a.title_style, &b.title_style),
         ("bodyStyle", &a.body_style, &b.body_style),
@@ -808,34 +833,51 @@ pub(super) fn template_changes(base: &Presentation, other: &Presentation) -> Vec
             ));
         }
     }
-    for &(i, j) in &master_pairs {
-        let (ma, mb) = (&ta.masters[i], &tb.masters[j]);
-        let key = &ka[i];
-        let props = master_properties(ma, mb);
-        if !props.is_empty() {
-            changes.push(object(
-                Kind::Master,
-                Status::Changed,
-                format!("master:{key}:{key}"),
-                Some(key),
-                Some(key),
-                props,
-            ));
-        }
-        let props = theme_properties(ma.theme.as_ref(), mb.theme.as_ref());
-        if !props.is_empty() {
-            changes.push(object(
-                Kind::Theme,
-                Status::Changed,
-                format!("theme:{key}:{key}"),
-                Some(key),
-                Some(key),
-                props,
-            ));
+    let levels = differing_levels(&ta.default_style, &tb.default_style);
+    if !levels.is_empty() {
+        let p = Property {
+            name: "defaultTextStyle",
+            base: levels_json(&ta.default_style, &levels),
+            other: levels_json(&tb.default_style, &levels),
+        };
+        changes.push(object(Kind::Master, Status::Changed, "defaultTextStyle".to_owned(), None, None, vec![p]));
+    }
+    // Layouts no master lists pair among themselves, under master `-`.
+    let pairs: Vec<(Option<usize>, Option<usize>, String)> = master_pairs
+        .iter()
+        .map(|&(i, j)| (Some(i), Some(j), ka[i].clone()))
+        .chain(std::iter::once((None, None, "-".to_owned())))
+        .collect();
+    for (mi, mj, key) in &pairs {
+        let (i, j) = (*mi, *mj);
+        if let (Some(i), Some(j)) = (i, j) {
+            let (ma, mb) = (&ta.masters[i], &tb.masters[j]);
+            let props = master_properties(ma, mb);
+            if !props.is_empty() {
+                changes.push(object(
+                    Kind::Master,
+                    Status::Changed,
+                    format!("master:{key}:{key}"),
+                    Some(key),
+                    Some(key),
+                    props,
+                ));
+            }
+            let props = theme_properties(ma.theme.as_ref(), mb.theme.as_ref());
+            if !props.is_empty() {
+                changes.push(object(
+                    Kind::Theme,
+                    Status::Changed,
+                    format!("theme:{key}:{key}"),
+                    Some(key),
+                    Some(key),
+                    props,
+                ));
+            }
         }
         // This master's layouts, by name.
-        let layouts = |t: &crate::model::Template, m: usize| -> Vec<usize> {
-            (0..t.layouts.len()).filter(|&l| t.layouts[l].master == Some(m)).collect()
+        let layouts = |t: &crate::model::Template, m: Option<usize>| -> Vec<usize> {
+            (0..t.layouts.len()).filter(|&l| t.layouts[l].master == m).collect()
         };
         let (la, lb) = (layouts(ta, i), layouts(tb, j));
         let lka = occurrence_keys(la.iter().map(|&l| ta.layouts[l].name.as_deref()));

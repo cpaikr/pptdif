@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{Format, LayoutDef, Levels, MasterDef, Paragraph, Presentation, Shape, Theme};
+use crate::model::{Format, Levels, MasterDef, Paragraph, Presentation, Shape, Theme};
 
 /// The master's text style a placeholder of `kind` draws on.
 fn master_style<'a>(master: &'a MasterDef, kind: Option<&str>) -> &'a Levels {
@@ -36,25 +36,44 @@ fn master_kind(kind: &str) -> &str {
     }
 }
 
-fn placeholders(shapes: &[Shape]) -> impl Iterator<Item = &Shape> {
-    shapes.iter().flat_map(Shape::walk).filter(|s| s.placeholder.is_some())
+/// A layout's or master's placeholders, indexed once by index and by type
+/// (the first of each), so matching costs the same however many
+/// placeholders a hostile part holds.
+#[derive(Default)]
+struct Placeholders<'a> {
+    by_index: HashMap<u32, &'a Shape>,
+    by_kind: HashMap<&'a str, &'a Shape>,
 }
 
-/// The layout placeholder a slide placeholder takes after: the one with
-/// its index when it has one, else the one of its type.
-fn layout_placeholder<'a>(layout: &'a LayoutDef, shape: &Shape) -> Option<&'a Shape> {
-    let ph = shape.placeholder.as_ref()?;
-    let found = if ph.index != 0 {
-        placeholders(&layout.shapes).find(|s| s.placeholder.as_ref().is_some_and(|l| l.index == ph.index))
-    } else {
-        None
-    };
-    found.or_else(|| placeholders(&layout.shapes).find(|s| s.placeholder.as_ref().is_some_and(|l| l.kind == ph.kind)))
+impl<'a> Placeholders<'a> {
+    fn of(shapes: &'a [Shape]) -> Self {
+        let mut out = Self::default();
+        for s in shapes.iter().flat_map(Shape::walk) {
+            if let Some(ph) = &s.placeholder {
+                out.by_index.entry(ph.index).or_insert(s);
+                out.by_kind.entry(ph.kind.as_str()).or_insert(s);
+            }
+        }
+        out
+    }
+
+    /// The placeholder a slide placeholder takes after: the one with its
+    /// index when it has one, else the one of its type.
+    fn matching(&self, shape: &Shape) -> Option<&'a Shape> {
+        let ph = shape.placeholder.as_ref()?;
+        let by_index = if ph.index == 0 { None } else { self.by_index.get(&ph.index).copied() };
+        by_index.or_else(|| self.by_kind.get(ph.kind.as_str()).copied())
+    }
+
+    fn of_kind(&self, kind: &str) -> Option<&'a Shape> {
+        self.by_kind.get(master_kind(kind)).copied()
+    }
 }
 
-fn master_placeholder<'a>(master: &'a MasterDef, kind: &str) -> Option<&'a Shape> {
-    let wanted = master_kind(kind);
-    placeholders(&master.shapes).find(|s| s.placeholder.as_ref().is_some_and(|m| m.kind == wanted))
+/// A layout with its placeholders indexed, and its master's.
+struct Inherited<'a> {
+    layout: Placeholders<'a>,
+    master: Option<(&'a MasterDef, Placeholders<'a>)>,
 }
 
 /// Fills `into` with what `from` has that `into` lacks.
@@ -68,12 +87,14 @@ fn inherit(into: &mut Format, from: &Format) {
 /// the minor East Asian one.
 fn name_fonts(format: &mut Format, theme: Option<&Theme>) {
     let Some(theme) = theme else { return };
-    for key in ["font", "fontEastAsian"] {
+    for key in ["font", "fontEastAsian", "fontComplex"] {
         let face = match format.get(key).map(String::as_str) {
             Some("+mj-lt") => theme.major.clone(),
             Some("+mn-lt") => theme.minor.clone(),
             Some("+mj-ea") => theme.major_east_asian.clone(),
             Some("+mn-ea") => theme.minor_east_asian.clone(),
+            Some("+mj-cs") => theme.major_complex.clone(),
+            Some("+mn-cs") => theme.minor_complex.clone(),
             _ => continue,
         };
         match face {
@@ -104,14 +125,20 @@ fn resolve_paragraphs(paragraphs: &mut [Paragraph], sources: &[&Levels], theme: 
     }
 }
 
-fn resolve_shape(shape: &mut Shape, layout: Option<&LayoutDef>, master: Option<&MasterDef>, default: &Levels) {
+fn resolve_shape(shape: &mut Shape, from: Option<&Inherited<'_>>, default: &Levels) {
     for child in &mut shape.children {
-        resolve_shape(child, layout, master, default);
+        resolve_shape(child, from, default);
     }
-    let kind = shape.placeholder.as_ref().map(|p| p.kind.clone());
-    let from_layout = layout.and_then(|l| layout_placeholder(l, shape));
+    let from_layout = from.and_then(|f| f.layout.matching(shape));
+    // A placeholder that names no type (`<p:ph idx="11"/>` reads as `obj`)
+    // is whatever its layout placeholder is: a footer, say.
+    let kind = shape.placeholder.as_ref().map(|p| {
+        let layout_kind = from_layout.and_then(|l| l.placeholder.as_ref()).map(|l| l.kind.clone());
+        if p.kind == "obj" { layout_kind.unwrap_or_else(|| p.kind.clone()) } else { p.kind.clone() }
+    });
+    let master = from.and_then(|f| f.master.as_ref());
     let from_master = match (master, &kind) {
-        (Some(m), Some(k)) => master_placeholder(m, k),
+        (Some((_, m)), Some(k)) => m.of_kind(k),
         _ => None,
     };
     shape.effective_geometry = shape
@@ -126,12 +153,12 @@ fn resolve_shape(shape: &mut Shape, layout: Option<&LayoutDef>, master: Option<&
     if kind.is_some() {
         sources.extend(from_layout.and_then(|s| s.list_style.as_ref()));
         sources.extend(from_master.and_then(|s| s.list_style.as_ref()));
-        if let Some(m) = master {
+        if let Some((m, _)) = master {
             sources.push(master_style(m, kind.as_deref()));
         }
     }
     sources.push(default);
-    let theme = master.and_then(|m| m.theme.as_ref());
+    let theme = master.and_then(|(m, _)| m.theme.as_ref());
     if let Some(text) = &mut shape.text {
         resolve_paragraphs(text, &sources, theme);
     }
@@ -147,12 +174,18 @@ fn resolve_shape(shape: &mut Shape, layout: Option<&LayoutDef>, master: Option<&
 /// Fills in every slide shape's effective geometry and text formatting.
 pub(crate) fn resolve(presentation: &mut Presentation) {
     let Presentation { slides, template, .. } = presentation;
-    let layouts: HashMap<&str, &LayoutDef> = template.layouts.iter().map(|l| (l.part.as_str(), l)).collect();
+    let indexed: HashMap<&str, Inherited<'_>> = template
+        .layouts
+        .iter()
+        .map(|l| {
+            let master = l.master.and_then(|m| template.masters.get(m)).map(|m| (m, Placeholders::of(&m.shapes)));
+            (l.part.as_str(), Inherited { layout: Placeholders::of(&l.shapes), master })
+        })
+        .collect();
     for slide in slides {
-        let layout = slide.layout_part.as_deref().and_then(|p| layouts.get(p).copied());
-        let master = layout.and_then(|l| l.master).and_then(|m| template.masters.get(m));
+        let from = slide.layout_part.as_deref().and_then(|p| indexed.get(p));
         for shape in &mut slide.shapes {
-            resolve_shape(shape, layout, master, &template.default_style);
+            resolve_shape(shape, from, &template.default_style);
         }
         if let Some(notes) = &mut slide.notes {
             resolve_paragraphs(notes, &[], None);

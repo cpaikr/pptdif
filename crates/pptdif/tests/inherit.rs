@@ -126,3 +126,89 @@ fn a_slide_that_moves_its_placeholder_off_the_layout_is_a_geometry_change() {
     assert_eq!((g[0].properties[0].base.as_f64(), g[0].properties[0].other.as_f64()), (Some(144.0), Some(288.0)));
     let _ = text_shape;
 }
+
+fn objects_of(c: &Comparison) -> Vec<(Kind, &str)> {
+    c.objects.iter().flat_map(|o| o.properties.iter().map(move |p| (o.kind, p.name))).collect()
+}
+
+#[test]
+fn a_default_style_change_is_one_change() {
+    let with = |sz: u32| {
+        let raw = RawDeck::new()
+            .presentation_xml(&format!(
+                r#"<p:defaultTextStyle><a:lvl1pPr><a:defRPr sz="{sz}"/></a:lvl1pPr></p:defaultTextStyle>"#
+            ))
+            .slide(RawSlide::new(1, &placed_box(5, "Note", "Gate", (0, 0, INCH, INCH), "")));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    let (a, b) = (with(1800), with(3600));
+    assert_eq!(
+        b.slides[0].shapes[0].text.as_ref().unwrap()[0].runs[0].effective.get("size").map(String::as_str),
+        Some("36pt")
+    );
+    let c = compare(&a, &b);
+    assert!(changes(&c).is_empty());
+    assert_eq!(objects_of(&c), [(Kind::Master, "defaultTextStyle")]);
+}
+
+#[test]
+fn a_default_paragraph_style_underlies_every_level() {
+    let raw = RawDeck::new()
+        .presentation_xml(r#"<p:defaultTextStyle><a:defPPr><a:defRPr lang="en-US"/></a:defPPr><a:lvl1pPr algn="r"><a:defRPr sz="2000"/></a:lvl1pPr></p:defaultTextStyle>"#)
+        .slide(RawSlide::new(1, &placed_box(5, "Note", "Gate", (0, 0, INCH, INCH), "")));
+    let d = pptdif::read_bytes(raw.to_bytes()).unwrap();
+    let level = &d.template.default_style[3];
+    // Level 4 has only what defPPr gives, and defPPr sets no size.
+    assert!(!level.run.contains_key("size"));
+    assert_eq!(d.template.default_style[0].paragraph.get("align").map(String::as_str), Some("r"));
+}
+
+#[test]
+fn repeated_layout_placeholders_pair_the_same_way_both_ways() {
+    let two = format!(
+        "{}{}",
+        placeholder_def(2, "Title 1", ("title", 0), (0, 0, INCH, INCH), ""),
+        placeholder_def(3, "Title 2", ("title", 0), (INCH, 0, INCH, INCH), "")
+    );
+    let with =
+        |shapes: &str| pptdif::read_bytes(RawDeck::new().layout_shapes(1, shapes).slide(slide("")).to_bytes()).unwrap();
+    let (a, b) = (with(&two), with(&placeholder_def(2, "Title 1", ("title", 0), (0, 0, INCH, INCH), "")));
+    let one_sided = |c: &Comparison| {
+        c.objects.iter().flat_map(|o| &o.properties).filter(|p| p.base.is_null() != p.other.is_null()).count()
+    };
+    assert_eq!((one_sided(&compare(&a, &b)), one_sided(&compare(&b, &a))), (1, 1));
+}
+
+#[test]
+fn a_placeholder_named_only_by_index_takes_its_layouts_type() {
+    let footer = placeholder_def(11, "Footer 1", ("ftr", 11), (0, 6 * INCH, 4 * INCH, INCH / 2), "");
+    let styles = r#"<p:titleStyle/><p:bodyStyle><a:lvl1pPr><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz="1200"/></a:lvl1pPr></p:otherStyle>"#;
+    let on_slide = r#"<p:sp><p:nvSpPr><p:cNvPr id="4" name="Footer"/><p:cNvSpPr/><p:nvPr><p:ph idx="11"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Draft</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let raw = RawDeck::new().layout_shapes(1, &footer).master("", styles).slide(RawSlide::new(1, on_slide));
+    let d = pptdif::read_bytes(raw.to_bytes()).unwrap();
+    let run = &d.slides[0].shapes[0].text.as_ref().unwrap()[0].runs[0].effective;
+    assert_eq!(run.get("size").map(String::as_str), Some("12pt"));
+}
+
+#[test]
+fn a_slide_moved_to_another_layout_reports_what_it_now_inherits() {
+    let layouts = |deck: RawDeck| {
+        deck.layout_shapes(0, &placeholder_def(2, "Title 1", ("title", 0), (0, 0, 8 * INCH, INCH), ""))
+            .layout_shapes(1, &placeholder_def(2, "Title 1", ("title", 0), (0, 3 * INCH, 8 * INCH, INCH), ""))
+    };
+    let on = |layout: usize| {
+        let raw = layouts(RawDeck::new()).slide(RawSlide::new(layout, &title("Harbour")));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    let c = compare(&on(0), &on(1));
+    let kinds: Vec<Kind> = changes(&c).iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, [Kind::Slide, Kind::Geometry], "{:?}", changes(&c));
+    assert!(c.objects.is_empty());
+}
+
+#[test]
+fn a_logo_on_the_master_is_a_master_change() {
+    let with = |logo: &str| pptdif::read_bytes(RawDeck::new().master(logo, "").slide(slide("")).to_bytes()).unwrap();
+    let c = compare(&with(""), &with(&placed_box(9, "Logo", "Harbour Co", (0, 0, INCH, INCH), "")));
+    assert_eq!(objects_of(&c), [(Kind::Master, "shapes")]);
+}

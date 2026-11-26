@@ -386,6 +386,9 @@ fn items_hash(items: &[Item]) -> u64 {
 struct Work {
     fell_back: bool,
     marker: Marker,
+    /// The slide pair being compared sits on layouts of different names,
+    /// so what its shapes inherit differs and is reported on the slide.
+    inherited: bool,
 }
 
 /// The most item pairs an order-free pairing scores in full. Beyond it,
@@ -792,6 +795,7 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
     }
 
     let (la, lb) = (leaves(a), leaves(b));
+    work.inherited = a.layout != b.layout;
     let pairs = pair_shapes(&la, &lb, work);
     // Groups compare their own geometry: a group moved as a unit moves its
     // members without changing their coordinates inside it.
@@ -949,7 +953,7 @@ pub fn compare(
 ) -> Comparison {
     let ia: Vec<Item> = base.slides.iter().map(slide_item).collect();
     let ib: Vec<Item> = other.slides.iter().map(slide_item).collect();
-    let mut work = Work { fell_back: false, marker: Marker::new() };
+    let mut work = Work { fell_back: false, marker: Marker::new(), inherited: false };
     let matched = match_slides(&ia, &ib, options.align, &mut work);
     let by_base: HashMap<usize, usize> = matched.pairs.iter().copied().collect();
     let paired_other: HashSet<usize> = matched.pairs.iter().map(|p| p.1).collect();
