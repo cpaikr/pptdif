@@ -299,6 +299,34 @@ mod tests {
         assert_eq!(super::decode(vec![0xC3]), None);
     }
 
+    fn zipped(members: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, text) in members {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_truncated_content_types_part_fails_even_after_a_match() {
+        let types = r#"<Types><Override PartName="/ppt/presentation.xml" ContentType="x"/><Default"#;
+        let mut pkg = Package::from_bytes(zipped(&[("[Content_Types].xml", types)]), &Limits::default()).unwrap();
+        let err = pkg.content_type("ppt/presentation.xml").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidXml);
+        let whole = r#"<Types><Override PartName="/ppt/presentation.xml" ContentType="x"/></Types>"#;
+        let mut pkg = Package::from_bytes(zipped(&[("[Content_Types].xml", whole)]), &Limits::default()).unwrap();
+        assert_eq!(pkg.content_type("ppt/presentation.xml").unwrap().as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn the_largest_byte_limits_do_not_overflow() {
+        let limits = Limits { max_member_bytes: u64::MAX, max_total_bytes: u64::MAX, ..Limits::default() };
+        let mut pkg = Package::from_bytes(zipped(&[("a.xml", "<a/>")]), &limits).unwrap();
+        assert_eq!(pkg.read_text("a.xml").unwrap().as_deref(), Some("<a/>"));
+    }
+
     #[test]
     fn non_zip_input_is_classified() {
         let ole = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];

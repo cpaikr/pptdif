@@ -7,7 +7,6 @@ mod cli;
 mod commands;
 mod envelope;
 
-use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -24,7 +23,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// stopped listening); any other failure means the document was lost, which
 /// only the exit status can still say.
 fn write_stdout(text: &str) -> Result<(), ()> {
-    let mut out = std::io::stdout().lock();
+    write_document(&mut std::io::stdout().lock(), text)
+}
+
+fn write_document(out: &mut impl std::io::Write, text: &str) -> Result<(), ()> {
     match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(()),
         _ => Ok(()),
@@ -104,6 +106,25 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    /// A stdout that fails every write with `kind`.
+    struct Failing(std::io::ErrorKind);
+
+    impl std::io::Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_is_fine_and_other_write_failures_are_not() {
+        assert_eq!(super::write_document(&mut Failing(std::io::ErrorKind::BrokenPipe), "{}\n"), Ok(()));
+        assert_eq!(super::write_document(&mut Failing(std::io::ErrorKind::StorageFull), "{}\n"), Err(()));
+        assert_eq!(super::write_document(&mut Vec::new(), "{}\n"), Ok(()));
+    }
+
     #[test]
     fn a_panic_becomes_an_internal_error() {
         let failure = super::guarded(|| panic!("boom")).err().expect("a failure");
