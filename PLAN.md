@@ -24,7 +24,12 @@ Status:
   shapes, text, notes) report them. Self-compare and swap symmetry hold as
   properties over random decks. No private corpus exists yet, so the
   alignment has not been reviewed on real version pairs.
-- Next action: M2 ([TODO.md](TODO.md)).
+- M2 is done: geometry with a tolerance, formatting as written (runs and
+  paragraphs of unchanged text; a shape's outline, fill, and line),
+  z-order and grouping, tables, pictures by content hash, charts' cached
+  series, comments with authors and replies, and sections, each observed
+  in the PowerPoint-saved fixture where PowerPoint writes it.
+- Next action: M3 ([TODO.md](TODO.md)).
 
 ## Decisions
 

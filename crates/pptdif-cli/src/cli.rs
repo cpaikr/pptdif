@@ -51,6 +51,13 @@ pub enum Kind {
     Shape,
     Text,
     Notes,
+    Geometry,
+    Format,
+    Table,
+    Picture,
+    Chart,
+    Comment,
+    Section,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -112,13 +119,22 @@ Examples:
 Reading the result:
   slides lists slide pairs (id p<n>) with a status: same, changed, onlyBase,
   onlyOther, or moved (a moved slide may also carry edits). Each change has a
-  stable id, a kind (slide, shape, text, notes), a status (changed, onlyBase,
-  onlyOther, moved), and base and other sides naming the slide (1-based),
-  the shape (id, name, placeholder), the paragraph (1-based), and its text.
-  A slide or shape change lists its changed properties. summary counts
-  everything; listed and omitted say what --kind, --slide, and --limit left
-  out, by slide pair and kind. Fields compare by kind, not by the number or
-  date they showed, so renumbered footers are not changes.")]
+  stable id, a kind, a status (changed, onlyBase, onlyOther, moved), and
+  base and other sides naming the slide (1-based), the shape (id, name,
+  placeholder), the paragraph or table row and column (1-based), and its
+  text. Kinds: slide (added, removed, moved, visibility, layout), shape
+  (added, removed, kind, name, zOrder, group), text and notes (paragraphs),
+  geometry (x, y, width, height in points, rotation, flips; beyond
+  --tolerance), format (as written: run and paragraph formatting of
+  unchanged text, a shape's outline, fill, and line), table (rows, columns,
+  cells), picture (image content, crop), chart (kinds, title, series
+  categories and values as cached), comment (text, author, replies), and
+  section (deck-level, under objects). Changed properties are listed with
+  both values. summary counts everything; listed and omitted say what
+  --kind, --slide, and --limit left out. Fields compare by kind, not by the
+  number or date they showed, so renumbered footers are not changes.
+  Formatting a shape inherits from its layout or master is not compared
+  yet.")]
     Compare {
         /// The earlier presentation (left side).
         base: PathBuf,
@@ -136,6 +152,9 @@ Reading the result:
         /// Also list slides with no changes.
         #[arg(long)]
         all: bool,
+        /// Positions and sizes closer than this, in points, are equal.
+        #[arg(long, default_value_t = 0.5)]
+        tolerance: f64,
         #[arg(long, value_enum, default_value_t = Align::Content)]
         align: Align,
         #[arg(long, value_enum, default_value_t = Format::Json)]

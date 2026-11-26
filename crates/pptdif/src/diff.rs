@@ -25,6 +25,8 @@ use crate::align::{self, Item, MIN_SIMILARITY, Options, fnv, longest_increasing}
 use crate::model::{Paragraph, Presentation, Shape, ShapeKind, Slide};
 use crate::textdiff::{Marker, Marks};
 
+mod objects;
+
 /// One vocabulary for `--kind` and the output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,10 +39,37 @@ pub enum Kind {
     Text,
     /// A paragraph of the speaker notes.
     Notes,
+    /// A shape's position, size, rotation, or flip, beyond the tolerance.
+    Geometry,
+    /// Formatting as written: a run's or paragraph's, or a shape's outline,
+    /// fill, and line.
+    Format,
+    /// A table's rows, columns, or cells.
+    Table,
+    /// A picture's image or crop.
+    Picture,
+    /// A chart's kinds, title, or series data.
+    Chart,
+    /// A slide's comments and their replies.
+    Comment,
+    /// The deck's sections.
+    Section,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Slide, Kind::Shape, Kind::Text, Kind::Notes];
+    pub const ALL: [Kind; 11] = [
+        Kind::Slide,
+        Kind::Shape,
+        Kind::Text,
+        Kind::Notes,
+        Kind::Geometry,
+        Kind::Format,
+        Kind::Table,
+        Kind::Picture,
+        Kind::Chart,
+        Kind::Comment,
+        Kind::Section,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +77,13 @@ impl Kind {
             Kind::Shape => "shape",
             Kind::Text => "text",
             Kind::Notes => "notes",
+            Kind::Geometry => "geometry",
+            Kind::Format => "format",
+            Kind::Table => "table",
+            Kind::Picture => "picture",
+            Kind::Chart => "chart",
+            Kind::Comment => "comment",
+            Kind::Section => "section",
         }
     }
 }
@@ -98,6 +134,11 @@ pub struct Side {
     /// 1-based paragraph, for text and notes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph: Option<usize>,
+    /// 1-based table row and column, for table changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -184,9 +225,21 @@ pub enum AlignMode {
     Position,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct CompareOptions {
     pub align: AlignMode,
+    /// Positions and sizes closer than this, in EMU, are equal.
+    pub tolerance: i64,
+}
+
+/// Half a point: well under a visible nudge, well over unit-conversion
+/// noise.
+pub const DEFAULT_TOLERANCE: i64 = 6_350;
+
+impl Default for CompareOptions {
+    fn default() -> Self {
+        Self { align: AlignMode::Content, tolerance: DEFAULT_TOLERANCE }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -195,9 +248,25 @@ pub struct Comparison {
     pub base: DeckRef,
     pub other: DeckRef,
     pub slides: Vec<SlidePair>,
+    /// Changes to the deck itself (sections).
+    pub objects: Vec<ObjectChange>,
     /// A slide, shape, or paragraph pairing exceeded its work bounds
     /// somewhere and may have missed the best pairing.
     pub fell_back: bool,
+}
+
+/// A change to the deck rather than a slide.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ObjectChange {
+    pub id: String,
+    pub kind: Kind,
+    pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
 }
 
 // ---------------------------------------------------------------------------
@@ -227,22 +296,64 @@ fn normalize(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect()
 }
 
+/// A slide's groups, nested ones included, depth first.
+fn groups(slide: &Slide) -> Vec<&Shape> {
+    slide.all_shapes().filter(|s| s.kind == ShapeKind::Group).collect()
+}
+
 /// The shapes compared one by one: every shape except groups, whose
 /// members stand for them.
 fn leaves(slide: &Slide) -> Vec<&Shape> {
     slide.all_shapes().filter(|s| s.kind != ShapeKind::Group).collect()
 }
 
-fn slide_item(slide: &Slide) -> Item {
-    let mut tokens: Vec<u64> = Vec::new();
-    for shape in leaves(slide) {
-        for p in shape.text.iter().flatten() {
-            let text = normalize(&p.compared());
-            if !text.is_empty() {
-                tokens.push(hash(&text));
+/// For each of [`leaves`], the groups holding it, outermost first: their
+/// names joined (`None` at the slide's top level), and their ids.
+fn group_paths(slide: &Slide) -> Vec<(Option<String>, Vec<Option<u32>>)> {
+    fn walk<'a>(shapes: &'a [Shape], path: &mut Vec<&'a Shape>, out: &mut Vec<(Option<String>, Vec<Option<u32>>)>) {
+        for shape in shapes {
+            if shape.kind == ShapeKind::Group {
+                path.push(shape);
+                walk(&shape.children, path, out);
+                path.pop();
+            } else {
+                let names: Vec<&str> = path.iter().map(|g| g.name.as_str()).collect();
+                out.push(((!names.is_empty()).then(|| names.join(" / ")), path.iter().map(|g| g.id).collect()));
             }
         }
     }
+    let mut out = Vec::new();
+    walk(&slide.shapes, &mut Vec::new(), &mut out);
+    out
+}
+
+/// What a shape holds, as tokens: each paragraph (of its text or its table
+/// cells), its image, and its chart's title and series names.
+fn content_tokens(shape: &Shape) -> Vec<u64> {
+    let mut tokens = Vec::new();
+    let mut paragraph = |p: &Paragraph| {
+        let text = normalize(&p.compared());
+        if !text.is_empty() {
+            tokens.push(hash(&text));
+        }
+    };
+    shape.text.iter().flatten().for_each(&mut paragraph);
+    for cell in shape.table.iter().flat_map(|t| t.rows.iter().flatten()) {
+        cell.text.iter().for_each(&mut paragraph);
+    }
+    if let Some(h) = shape.image.as_ref().and_then(|i| i.hash) {
+        tokens.push(fnv(&[b"image", &h.to_le_bytes()]));
+    }
+    if let Some(chart) = shape.chart.as_ref().and_then(|c| c.data.as_ref()) {
+        for name in chart.title.iter().chain(chart.series.iter().filter_map(|s| s.name.as_ref())) {
+            tokens.push(fnv(&[b"chart", normalize(name).as_bytes()]));
+        }
+    }
+    tokens
+}
+
+fn slide_item(slide: &Slide) -> Item {
+    let mut tokens: Vec<u64> = leaves(slide).into_iter().flat_map(content_tokens).collect();
     tokens.sort_unstable();
     Item { key: title_of(slide).map(|t| normalize(&t)), tokens, shape: slide.layout.as_deref().map_or(0, hash) }
 }
@@ -392,6 +503,10 @@ fn shape_item(shape: &Shape) -> Item {
     for p in shape.text.iter().flatten() {
         tokens.extend(words(&p.compared()).map(|w| hash(&w)));
     }
+    // Tables, pictures, and charts weigh in by what they hold.
+    if shape.text.is_none() {
+        tokens.extend(content_tokens(shape));
+    }
     tokens.sort_unstable();
     Item { key: None, tokens, shape: 0 }
 }
@@ -465,7 +580,8 @@ fn pair_shapes(a: &[&Shape], b: &[&Shape], work: &mut Work) -> Vec<(usize, usize
 // Paragraphs
 
 /// What two paragraph lists differ by: `(base, other)` 0-based indices,
-/// either missing for a paragraph on one side only, with the status.
+/// either missing for a paragraph on one side only, with the status:
+/// `Same` for a pair whose text did not change.
 /// Empty paragraphs are left out: a blank line added or removed is not
 /// reported.
 fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph], work: &mut Work) -> Vec<(Status, Option<usize>, Option<usize>)> {
@@ -489,9 +605,8 @@ fn diff_paragraphs(a: &[Paragraph], b: &[Paragraph], work: &mut Work) -> Vec<(St
     for &(i, j) in &alignment.pairs {
         used_a.insert(i);
         used_b.insert(j);
-        if a[ka[i]].compared() != b[kb[j]].compared() {
-            out.push((Status::Changed, Some(ka[i]), Some(kb[j])));
-        }
+        let status = if a[ka[i]].compared() == b[kb[j]].compared() { Status::Same } else { Status::Changed };
+        out.push((status, Some(ka[i]), Some(kb[j])));
     }
     for &(i, j) in &alignment.moves {
         used_a.insert(i);
@@ -606,9 +721,14 @@ fn paragraph_changes(
         shape: shape.cloned(),
         paragraph: Some(i + 1),
         text: Some(ps[i].text()),
+        row: None,
+        column: None,
     };
     let mut changes = Vec::new();
     for (status, i, j) in diff_paragraphs(a.0, b.0, work) {
+        if status == Status::Same {
+            continue;
+        }
         let mut c = Change::new(kind, status, i.map(|i| side(a, i)), j.map(|j| side(b, j)));
         if let (Status::Changed, Some(x), Some(y)) = (status, &c.base, &c.other) {
             c.marks = work.marker.marks(x.text.as_deref().unwrap_or_default(), y.text.as_deref().unwrap_or_default());
@@ -633,17 +753,17 @@ fn fingerprint(slide: &Slide) -> u64 {
     hash(&described)
 }
 
-fn compare_slide(a: &Slide, ai: usize, b: &Slide, bi: usize, work: &mut Work) -> Vec<Change> {
+fn compare_slide(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
     // A fixed orientation, as for the slides.
     if fingerprint(a) > fingerprint(b) {
-        return compare_slide_oriented(b, bi, a, ai, work).into_iter().map(Change::mirrored).collect();
+        return compare_slide_oriented(b, bi, a, ai, tolerance, work).into_iter().map(Change::mirrored).collect();
     }
-    compare_slide_oriented(a, ai, b, bi, work)
+    compare_slide_oriented(a, ai, b, bi, tolerance, work)
 }
 
-fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, work: &mut Work) -> Vec<Change> {
+fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
     let mut changes = Vec::new();
-    let slide_side = |slide: usize| Side { slide, shape: None, paragraph: None, text: None };
+    let slide_side = |slide: usize| Side { slide, shape: None, paragraph: None, text: None, row: None, column: None };
 
     let mut props = Vec::new();
     if a.hidden != b.hidden {
@@ -661,6 +781,13 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, work: &mut
 
     let (la, lb) = (leaves(a), leaves(b));
     let pairs = pair_shapes(&la, &lb, work);
+    // Groups compare their own geometry: a group moved as a unit moves its
+    // members without changing their coordinates inside it.
+    let (ga, gb) = (groups(a), groups(b));
+    for (i, j) in pair_shapes(&ga, &gb, work) {
+        let (ra, rb) = (shape_ref(ga[i], 0), shape_ref(gb[j], 0));
+        changes.extend(objects::group_changes(ga[i], (ai, &ra), gb[j], (bi, &rb), tolerance));
+    }
     let (pa, pb): (HashSet<usize>, HashSet<usize>) =
         (pairs.iter().map(|p| p.0).collect(), pairs.iter().map(|p| p.1).collect());
     let shape_side = |slide: usize, shape: &Shape, k: usize| Side {
@@ -668,6 +795,8 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, work: &mut
         shape: Some(shape_ref(shape, k + 1)),
         paragraph: None,
         text: shape_text(shape),
+        row: None,
+        column: None,
     };
     for (i, s) in la.iter().enumerate().filter(|(i, _)| !pa.contains(i)) {
         changes.push(Change::new(Kind::Shape, Status::OnlyBase, Some(shape_side(ai, s, i)), None));
@@ -697,17 +826,53 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, work: &mut
             });
         }
         if !props.is_empty() {
-            let side = |slide, r: &ShapeRef| Side { slide, shape: Some(r.clone()), paragraph: None, text: None };
+            let side = |slide, r: &ShapeRef| Side {
+                slide,
+                shape: Some(r.clone()),
+                paragraph: None,
+                text: None,
+                row: None,
+                column: None,
+            };
             let mut c = Change::new(Kind::Shape, Status::Changed, Some(side(ai, &ra)), Some(side(bi, &rb)));
             c.properties = props;
             changes.push(c);
         }
         let (ta, tb) = (sa.text.as_deref().unwrap_or_default(), sb.text.as_deref().unwrap_or_default());
         changes.extend(paragraph_changes(Kind::Text, (ta, ai, Some(&ra)), (tb, bi, Some(&rb)), work));
+        changes.extend(objects::shape_changes(sa, (ai, &ra), sb, (bi, &rb), tolerance, work));
+    }
+    // Z-order and group moves join the pair's shape change, one per shape.
+    for ((i, j), props) in objects::arrangement_properties(&group_paths(a), &group_paths(b), &pairs) {
+        let (ra, rb) = (shape_ref(la[i], i + 1), shape_ref(lb[j], j + 1));
+        let existing = changes.iter_mut().find(|c| {
+            c.kind == Kind::Shape
+                && c.status == Status::Changed
+                && c.base.as_ref().and_then(|s| s.shape.as_ref()).is_some_and(|s| s.position == ra.position)
+                && c.other.as_ref().and_then(|s| s.shape.as_ref()).is_some_and(|s| s.position == rb.position)
+        });
+        if let Some(c) = existing {
+            c.properties.extend(props);
+        } else {
+            {
+                let side = |slide, r: &ShapeRef| Side {
+                    slide,
+                    shape: Some(r.clone()),
+                    paragraph: None,
+                    text: None,
+                    row: None,
+                    column: None,
+                };
+                let mut c = Change::new(Kind::Shape, Status::Changed, Some(side(ai, &ra)), Some(side(bi, &rb)));
+                c.properties = props;
+                changes.push(c);
+            }
+        }
     }
 
     let (na, nb) = (a.notes.as_deref().unwrap_or_default(), b.notes.as_deref().unwrap_or_default());
     changes.extend(paragraph_changes(Kind::Notes, (na, ai, None), (nb, bi, None), work));
+    changes.extend(objects::comment_changes(&a.comments, ai, &b.comments, bi, work));
     changes
 }
 
@@ -735,6 +900,18 @@ fn locator(side: Option<&Side>) -> String {
     }
     if let Some(p) = side.paragraph {
         let _ = write!(out, ".{p}");
+    }
+    match (side.row, side.column) {
+        (Some(r), Some(c)) => {
+            let _ = write!(out, ".r{r}c{c}");
+        }
+        (Some(r), None) => {
+            let _ = write!(out, ".r{r}");
+        }
+        (None, Some(c)) => {
+            let _ = write!(out, ".c{c}");
+        }
+        (None, None) => {}
     }
     out
 }
@@ -772,7 +949,7 @@ pub fn compare(
             {
                 let b = &other.slides[j];
                 let moved = matched.moved.contains(&(i, j));
-                let changes = compare_slide(a, i + 1, b, j + 1, &mut work);
+                let changes = compare_slide(a, i + 1, b, j + 1, options.tolerance, &mut work);
                 let status = if moved {
                     Status::Moved
                 } else if changes.is_empty() {
@@ -784,13 +961,14 @@ pub fn compare(
             }
         } else {
             {
-                let side = Side { slide: i + 1, shape: None, paragraph: None, text: title_of(a) };
+                let side =
+                    Side { slide: i + 1, shape: None, paragraph: None, text: title_of(a), row: None, column: None };
                 (Status::OnlyBase, None, false, vec![Change::new(Kind::Slide, Status::OnlyBase, Some(side), None)])
             }
         };
         let mut changes = changes;
         if moved {
-            let side = |slide| Side { slide, shape: None, paragraph: None, text: None };
+            let side = |slide| Side { slide, shape: None, paragraph: None, text: None, row: None, column: None };
             let j = by_base[&i];
             changes.insert(0, Change::new(Kind::Slide, Status::Moved, Some(side(i + 1)), Some(side(j + 1))));
         }
@@ -805,7 +983,7 @@ pub fn compare(
     }
     for (j, b) in other.slides.iter().enumerate().filter(|(j, _)| !paired_other.contains(j)) {
         let n = slides.len() + 1;
-        let side = Side { slide: j + 1, shape: None, paragraph: None, text: title_of(b) };
+        let side = Side { slide: j + 1, shape: None, paragraph: None, text: title_of(b), row: None, column: None };
         slides.push(SlidePair {
             id: format!("p{n}"),
             status: Status::OnlyOther,
@@ -818,10 +996,12 @@ pub fn compare(
     for pair in &mut slides {
         assign_ids(pair);
     }
+    let objects = objects::section_changes(base, other, &matched.pairs);
     Comparison {
         base: DeckRef { file: base_file.to_owned(), slides: base.slides.len() },
         other: DeckRef { file: other_file.to_owned(), slides: other.slides.len() },
         slides,
+        objects,
         fell_back: matched.fell_back || work.fell_back,
     }
 }
@@ -860,9 +1040,11 @@ pub struct Listing {
     pub summary: Summary,
     /// Changes listed after filters and the limit.
     pub listed: usize,
-    /// Changes the limit cut, by slide pair and kind.
+    /// Changes the limit cut, by slide pair (or `objects`) and kind.
     pub omitted: BTreeMap<String, BTreeMap<&'static str, usize>>,
     pub slides: Vec<SlidePair>,
+    /// Deck-level changes; `--slide` leaves them out.
+    pub objects: Vec<ObjectChange>,
 }
 
 pub fn summarize(comparison: &Comparison) -> Summary {
@@ -884,6 +1066,9 @@ pub fn summarize(comparison: &Comparison) -> Summary {
         for c in &pair.changes {
             *summary.changes.entry(c.kind.as_str()).or_default() += 1;
         }
+    }
+    for o in &comparison.objects {
+        *summary.changes.entry(o.kind.as_str()).or_default() += 1;
     }
     summary
 }
@@ -924,6 +1109,18 @@ pub fn listing(comparison: &Comparison, filter: &Filter) -> Listing {
             changes: kept,
         });
     }
+    // Deck-level changes share the limit; `--slide` leaves them out.
+    let mut objects: Vec<ObjectChange> = Vec::new();
+    if filter.slide.is_none() {
+        for o in comparison.objects.iter().filter(|o| filter.kinds.is_empty() || filter.kinds.contains(&o.kind)) {
+            if filter.limit == 0 || listed < filter.limit {
+                listed += 1;
+                objects.push(o.clone());
+            } else {
+                *omitted.entry("objects".to_owned()).or_default().entry(o.kind.as_str()).or_default() += 1;
+            }
+        }
+    }
     Listing {
         base: comparison.base.clone(),
         other: comparison.other.clone(),
@@ -931,5 +1128,6 @@ pub fn listing(comparison: &Comparison, filter: &Filter) -> Listing {
         listed,
         omitted,
         slides,
+        objects,
     }
 }

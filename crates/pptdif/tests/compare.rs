@@ -154,7 +154,7 @@ fn position_alignment_pairs_slide_n_with_slide_n() {
     let mut slides = five();
     slides.insert(0, content_slide("Cover", &["Harbour project"]));
     let (a, b) = (deck(five()), deck(slides));
-    let c = diff::compare("a", &a, "b", &b, CompareOptions { align: AlignMode::Position });
+    let c = diff::compare("a", &a, "b", &b, CompareOptions { align: AlignMode::Position, ..CompareOptions::default() });
     assert!(c.slides.iter().take(5).all(|p| p.base.as_ref().unwrap().index == p.other.as_ref().unwrap().index));
     assert_eq!(c.slides.last().unwrap().status, Status::OnlyOther);
 }
@@ -298,7 +298,8 @@ fn a_field_without_text_is_still_a_field() {
     let d = deck(vec![RawSlide::new(1, &paragraphs_shape(4, "Date", Some(("dt", 10)), &[empty]))]);
     let runs = &d.slides[0].shapes[0].text.as_ref().unwrap()[0].runs;
     assert_eq!(runs.len(), 1);
-    assert!(matches!(&runs[0], pptdif::model::Run::Field { kind, text } if kind == "datetime1" && text.is_empty()));
+    assert_eq!(runs[0].kind, pptdif::model::RunKind::Field("datetime1".to_owned()));
+    assert!(runs[0].text.is_empty());
 }
 
 #[test]

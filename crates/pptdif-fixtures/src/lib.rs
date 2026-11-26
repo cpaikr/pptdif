@@ -6,6 +6,9 @@
 //! The parts are the minimum the reader needs, not what PowerPoint needs to
 //! open the file: PowerPoint-saved fixtures live in `fixtures/powerpoint/`.
 
+// Fixture XML is built for clarity, not speed.
+#![allow(clippy::format_collect)]
+
 use std::fmt::Write as _;
 use std::io::{Cursor, Write as _};
 
@@ -35,6 +38,11 @@ pub struct RawSlide {
     comments: usize,
     replies: usize,
     timing: bool,
+    /// Extra parts this slide refers to: relationship id, kind, part name
+    /// under `ppt/`, and bytes.
+    parts: Vec<(String, &'static str, String, Vec<u8>)>,
+    /// External relationships: id, kind, and address.
+    externals: Vec<(String, &'static str, String)>,
 }
 
 impl RawSlide {
@@ -71,6 +79,22 @@ impl RawSlide {
         self
     }
 
+    /// A part this slide refers to by `rid`, such as an image
+    /// (`"image"`, `"media/image1.png"`) or a chart (`"chart"`,
+    /// `"charts/chart1.xml"`); `name` is under `ppt/`.
+    #[must_use]
+    pub fn part(mut self, rid: &str, kind: &'static str, name: &str, bytes: &[u8]) -> Self {
+        self.parts.push((rid.to_owned(), kind, name.to_owned(), bytes.to_vec()));
+        self
+    }
+
+    /// A relationship to something outside the package (a linked image).
+    #[must_use]
+    pub fn external(mut self, rid: &str, kind: &'static str, target: &str) -> Self {
+        self.externals.push((rid.to_owned(), kind, target.to_owned()));
+        self
+    }
+
     /// An animation timing tree.
     #[must_use]
     pub fn animated(mut self) -> Self {
@@ -91,6 +115,8 @@ pub struct RawDeck {
     /// Extra `sldIdLst` entries and presentation relationships.
     slide_entries: String,
     presentation_rels: Vec<(&'static str, String)>,
+    /// Extra text parts, by member name.
+    extra_parts: Vec<(String, String)>,
 }
 
 impl Default for RawDeck {
@@ -110,6 +136,7 @@ impl RawDeck {
             presentation_extra: String::new(),
             slide_entries: String::new(),
             presentation_rels: Vec::new(),
+            extra_parts: Vec::new(),
         }
     }
 
@@ -155,13 +182,22 @@ impl RawDeck {
         self
     }
 
+    /// A text part at `name` (a member name), such as
+    /// `ppt/commentAuthors.xml`; pair it with [`Self::presentation_rel`].
+    #[must_use]
+    pub fn text_part(mut self, name: &str, xml: &str) -> Self {
+        self.extra_parts.push((name.to_owned(), xml.to_owned()));
+        self
+    }
+
     /// The `sldId` id of the slide at a 0-based index.
     pub fn slide_id(index: usize) -> usize {
         256 + index
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut parts: Vec<(String, String)> = Vec::new();
+        let mut parts: Vec<(String, String)> = self.extra_parts.clone();
+        let mut binary: Vec<(String, Vec<u8>)> = Vec::new();
         let mut overrides = format!(r#"<Override PartName="/ppt/presentation.xml" ContentType="{}"/>"#, self.main_type);
         let mut add_override = |part: &str, kind: &str| {
             let _ = write!(overrides, r#"<Override PartName="/{part}" ContentType="{CT}.{kind}+xml"/>"#);
@@ -295,14 +331,30 @@ impl RawDeck {
                 add_override(&comments, "comments");
                 slide_rels.push(("rId3".to_owned(), "comments", format!("../comments/comment{n}.xml")));
             }
-            parts.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), owned_rels(&slide_rels)));
+            for (rid, kind, name, bytes) in &slide.parts {
+                slide_rels.push((rid.clone(), kind, format!("../{name}")));
+                // Slides may share a part (an image); it is written once.
+                let member = format!("ppt/{name}");
+                if !binary.iter().any(|(n, _)| *n == member) {
+                    binary.push((member, bytes.clone()));
+                }
+            }
+            let mut rels_xml = owned_rels(&slide_rels);
+            for (rid, kind, target) in &slide.externals {
+                let entry = format!(
+                    r#"<Relationship Id="{rid}" Type="{REL}/{kind}" Target="{}" TargetMode="External"/>"#,
+                    escape(target)
+                );
+                rels_xml = rels_xml.replace("</Relationships>", &format!("{entry}</Relationships>"));
+            }
+            parts.push((format!("ppt/slides/_rels/slide{n}.xml.rels"), rels_xml));
         }
 
         let content_types = format!(
             r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{overrides}<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#
         );
         parts.insert(0, ("[Content_Types].xml".to_owned(), content_types));
-        zip_parts(&parts)
+        zip_parts(&parts, &binary)
     }
 }
 
@@ -321,12 +373,13 @@ fn owned_rels(entries: &[(String, &str, String)]) -> String {
     xml
 }
 
-fn zip_parts(parts: &[(String, String)]) -> Vec<u8> {
+fn zip_parts(parts: &[(String, String)], binary: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for (name, text) in parts {
+    let members = parts.iter().map(|(n, t)| (n, t.as_bytes())).chain(binary.iter().map(|(n, b)| (n, b.as_slice())));
+    for (name, bytes) in members {
         zip.start_file(name.as_str(), options).expect("writing to memory cannot fail");
-        zip.write_all(text.as_bytes()).expect("writing to memory cannot fail");
+        zip.write_all(bytes).expect("writing to memory cannot fail");
     }
     zip.finish().expect("writing to memory cannot fail").into_inner()
 }
@@ -349,11 +402,83 @@ pub fn text_shape(id: u32, name: &str, placeholder: Option<(&str, u32)>, text: &
     )
 }
 
-/// A picture shape (its image part is not written).
+/// A picture shape whose image is relationship `rIdImg` (add the image
+/// with [`RawSlide::part`] when it matters).
 pub fn picture(id: u32, name: &str) -> String {
+    picture_of(id, name, "rIdImg")
+}
+
+/// A picture shape whose image is relationship `rid`.
+pub fn picture_of(id: u32, name: &str, rid: &str) -> String {
     format!(
-        r#"<p:pic><p:nvPicPr><p:cNvPr id="{id}" name="{}"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdImg"/></p:blipFill><p:spPr/></p:pic>"#,
+        r#"<p:pic><p:nvPicPr><p:cNvPr id="{id}" name="{}"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="{rid}"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#,
         escape(name)
+    )
+}
+
+/// A text box at `(x, y)` sized `(cx, cy)` in EMU, with `spPr_extra`
+/// (fill, line) after its geometry.
+#[allow(clippy::similar_names)]
+pub fn placed_box(id: u32, name: &str, text: &str, (x, y, cx, cy): (i64, i64, i64, i64), sp_pr_extra: &str) -> String {
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{sp_pr_extra}</p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{}</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        escape(name),
+        escape(text)
+    )
+}
+
+/// A table frame whose rows are given cell by cell.
+pub fn table(id: u32, name: &str, rows: &[&[&str]]) -> String {
+    let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let grid: String = (0..columns).map(|_| r#"<a:gridCol w="914400"/>"#).collect();
+    let body: String = rows
+        .iter()
+        .map(|r| {
+            let cells: String = r
+                .iter()
+                .map(|c| {
+                    format!(
+                        "<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>{}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>",
+                        escape(c)
+                    )
+                })
+                .collect();
+            format!(r#"<a:tr h="370840">{cells}</a:tr>"#)
+        })
+        .collect();
+    frame(id, name, uri::TABLE, &format!("<a:tbl><a:tblPr/><a:tblGrid>{grid}</a:tblGrid>{body}</a:tbl>"))
+}
+
+/// A chart frame whose chart part is relationship `rid`.
+pub fn chart_frame(id: u32, name: &str, rid: &str) -> String {
+    frame(
+        id,
+        name,
+        uri::CHART,
+        &format!(r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="{rid}"/>"#),
+    )
+}
+
+/// A chart part: one bar chart with these series of `(name, values)` over
+/// `categories`.
+pub fn chart_part(categories: &[&str], series: &[(&str, &[f64])]) -> String {
+    let points = |values: &mut dyn Iterator<Item = String>| -> String {
+        values.enumerate().map(|(i, v)| format!(r#"<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>"#)).collect()
+    };
+    let cats = points(&mut categories.iter().map(|c| escape(c)));
+    let body: String = series
+        .iter()
+        .enumerate()
+        .map(|(k, (name, values))| {
+            let vals = points(&mut values.iter().map(f64::to_string));
+            format!(
+                r#"<c:ser><c:idx val="{k}"/><c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>{}</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:strCache>{cats}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache>{vals}</c:numCache></c:numRef></c:val></c:ser>"#,
+                escape(name)
+            )
+        })
+        .collect();
+    format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart>{body}</c:barChart></c:plotArea></c:chart></c:chartSpace>"#
     )
 }
 

@@ -6,10 +6,10 @@ matched by content, so an inserted or reordered slide is one change, not
 every slide after it. Agents read its JSON; people will read its
 side-by-side HTML report. It needs no PowerPoint.
 
-**Status:** M0 and M1 are done: `inspect`, `text`, and `compare` over
-slides, shapes, text, and notes. Geometry, tables, pictures, charts, and
-formatting (M2), inherited formatting (M3), and the HTML report (M4) are
-next. See [PLAN.md](PLAN.md).
+**Status:** M0 to M2 are done: `inspect`, `text`, and `compare` over
+slides, shapes, text, notes, geometry, formatting as written, tables,
+pictures, charts, comments, and sections. Inherited formatting (M3) and
+the HTML report (M4) are next. See [PLAN.md](PLAN.md).
 
 ## Commands
 
@@ -19,14 +19,22 @@ next. See [PLAN.md](PLAN.md).
   masters with their layouts. It prints no slide text.
 - `pptdif text DECK [--slide N]` lists every shape's paragraphs (with
   outline level) and the speaker notes.
-- `pptdif compare BASE OTHER [--slide N] [--kind slide,shape,text,notes]
-  [--limit N] [--all] [--align content|position]` reports what changed.
+- `pptdif compare BASE OTHER [--slide N] [--kind KIND,...] [--limit N]
+  [--all] [--tolerance PT] [--align content|position]` reports what
+  changed.
   Slides pair by title and text, so an inserted or reordered slide is one
   change and a slide moved and edited is still one slide; shapes pair by
   placeholder, id, name, and content; paragraphs align, so a new bullet is
   one change. Each change has a stable id and both sides' slide, shape,
   paragraph, and text. Fields (slide numbers, dates) compare by kind, so
-  renumbered footers are not changes.
+  renumbered footers are not changes. Beyond text it reports geometry
+  (beyond a tolerance, half a point by default; a placeholder that writes
+  no position of its own is not compared until inheritance is resolved), formatting as written
+  (runs and paragraphs of unchanged text, a shape's outline, fill, and
+  line), z-order and grouping, tables (columns and rows aligned, then
+  cells), pictures by image content, charts' cached series, comments with
+  their authors and replies, and the deck's sections. Formatting a shape
+  inherits from its layout or master is not compared yet.
 
 All accept `--format text`. Run `pptdif <command> --help` for details.
 

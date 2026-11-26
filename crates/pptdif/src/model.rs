@@ -5,6 +5,7 @@
 //! placeholders, notes and comment presence). Text, geometry, and
 //! formatting arrive with M1 and M2 (PLAN.md, "Model").
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -64,24 +65,37 @@ pub struct Placeholder {
     pub index: u32,
 }
 
-/// One piece of a paragraph.
+/// Formatting as written, by property name (`bold`, `size`, `color`, ...),
+/// values as text. Only what the file states is here: an absent property
+/// is inherited from the shape, layout, or master (resolved in M3).
+pub type Format = BTreeMap<&'static str, String>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Run {
-    Text(String),
+pub enum RunKind {
+    Text,
     /// `a:br`: a line break inside the paragraph.
     Break,
-    /// `a:fld`: text PowerPoint fills in (slide number, date). `text` is
-    /// what it showed when saved; `kind` is its `type`.
-    Field {
-        kind: String,
-        text: String,
-    },
+    /// `a:fld`: text PowerPoint fills in (slide number, date), by its
+    /// `type`; the run's text is what it showed when saved.
+    Field(String),
+}
+
+/// One piece of a paragraph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub kind: RunKind,
+    /// Empty for a break.
+    pub text: String,
+    /// `a:rPr` as written.
+    pub format: Format,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paragraph {
     /// Outline level, 0 for the top (`a:pPr` `lvl`).
     pub level: u8,
+    /// `a:pPr` as written (alignment, bullet), apart from the level.
+    pub format: Format,
     pub runs: Vec<Run>,
 }
 
@@ -90,9 +104,9 @@ impl Paragraph {
     pub fn text(&self) -> String {
         let mut out = String::new();
         for run in &self.runs {
-            match run {
-                Run::Text(t) | Run::Field { text: t, .. } => out.push_str(t),
-                Run::Break => out.push('\n'),
+            match run.kind {
+                RunKind::Break => out.push('\n'),
+                _ => out.push_str(&run.text),
             }
         }
         out
@@ -105,21 +119,89 @@ impl Paragraph {
     pub fn compared(&self) -> String {
         let mut out = String::new();
         for run in &self.runs {
-            match run {
-                Run::Text(t) => out.push_str(t),
-                Run::Field { kind, .. } => {
+            match &run.kind {
+                RunKind::Text => out.push_str(&run.text),
+                RunKind::Field(kind) => {
                     out.push('\0');
                     out.push_str(kind);
                     out.push('\0');
                 }
-                Run::Break => out.push('\n'),
+                RunKind::Break => out.push('\n'),
             }
         }
         out
     }
 }
 
+/// A shape's position and size in EMU, as written in its `xfrm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Geometry {
+    pub x: i64,
+    pub y: i64,
+    pub cx: i64,
+    pub cy: i64,
+    /// Clockwise, in 60,000ths of a degree.
+    pub rotation: i64,
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+/// A picture's image.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    /// The `blip`'s relationship id.
+    pub rid: String,
+    /// The image part, when the picture embeds one (a linked picture has
+    /// none).
+    pub part: Option<String>,
+    /// A content hash of the image part's bytes: the same picture under
+    /// another part name compares equal.
+    pub hash: Option<u64>,
+    /// `a:srcRect` as written, when the picture is cropped.
+    pub crop: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell {
+    pub text: Vec<Paragraph>,
+    /// Covered by a merged neighbour (`hMerge` or `vMerge`).
+    pub merged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Table {
+    /// Rows of cells, one cell per grid column.
+    pub rows: Vec<Vec<Cell>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Series {
+    pub name: Option<String>,
+    /// Category labels (or x values) as cached in the chart part.
+    pub categories: Vec<String>,
+    /// Values as cached; `None` for a point with no value.
+    pub values: Vec<Option<f64>>,
+}
+
+/// A chart's cached data: what PowerPoint last drew, not its workbook.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Chart {
+    /// The plot kinds, such as `barChart` or `lineChart`.
+    pub kinds: Vec<String>,
+    pub title: Option<String>,
+    pub series: Vec<Series>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartRef {
+    /// The `c:chart` relationship id.
+    pub rid: String,
+    /// The chart part's data, when it could be read (`chartex` charts are
+    /// not).
+    pub data: Option<Chart>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
     pub kind: ShapeKind,
     /// `cNvPr` `id`, unique within one slide as written.
@@ -127,15 +209,56 @@ pub struct Shape {
     pub name: String,
     pub hidden: bool,
     pub placeholder: Option<Placeholder>,
-    /// A picture that plays video or audio.
+    /// A shape that plays video or audio.
     pub media: bool,
+    /// The `xfrm` as written; `None` for a placeholder that takes its
+    /// geometry from the layout.
+    pub geometry: Option<Geometry>,
+    /// The preset outline (`prstGeom` `prst`), or `custom`.
+    pub outline: Option<String>,
+    /// The shape's own fill and line, described canonically.
+    pub fill: Option<String>,
+    pub line: Option<String>,
     /// The text body of an autoshape or text box, when it has one.
     pub text: Option<Vec<Paragraph>>,
+    pub image: Option<Image>,
+    pub table: Option<Table>,
+    pub chart: Option<ChartRef>,
     /// A group's members, in z-order.
     pub children: Vec<Shape>,
 }
 
+impl Shape {
+    pub(crate) fn new(kind: ShapeKind) -> Self {
+        Self {
+            kind,
+            id: None,
+            name: String::new(),
+            hidden: false,
+            placeholder: None,
+            media: false,
+            geometry: None,
+            outline: None,
+            fill: None,
+            line: None,
+            text: None,
+            image: None,
+            table: None,
+            chart: None,
+            children: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub author: Option<String>,
+    pub text: String,
+    /// Replies in order, as `author: text` when the author is known.
+    pub replies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slide {
     /// The slide part's member name.
     pub part: String,
@@ -150,8 +273,8 @@ pub struct Slide {
     /// The speaker notes' text (the notes page's body placeholder), when the
     /// slide has a notes page.
     pub notes: Option<Vec<Paragraph>>,
-    /// Comments, without their replies.
-    pub comments: usize,
+    /// Comments in file order, without their replies.
+    pub comments: Vec<Comment>,
     /// The slide carries a `<p:timing>` tree (animations).
     pub animated: bool,
 }
@@ -178,7 +301,7 @@ pub struct Warning {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Presentation {
     pub format: DeckFormat,
     pub slide_size: Option<Size>,

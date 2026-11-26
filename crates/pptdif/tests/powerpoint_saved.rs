@@ -41,7 +41,7 @@ fn notes_comments_and_animations() {
     // A modern comment: relationship type ending in `comments`
     // (office/2018/10), part `ppt/comments/modernComment_*.xml`, one
     // `p188:cm` per comment.
-    assert_eq!(deck.slides.iter().map(|s| s.comments).collect::<Vec<_>>(), [0, 0, 0, 1]);
+    assert_eq!(deck.slides.iter().map(|s| s.comments.len()).collect::<Vec<_>>(), [0, 0, 0, 1]);
     // PowerPoint writes `<p:timing>` only on the slide with an animation.
     assert_eq!(deck.slides.iter().map(|s| s.animated).collect::<Vec<_>>(), [false, true, false, false]);
 }
@@ -62,6 +62,42 @@ fn text_levels_and_notes() {
     );
     let notes = deck.slides[0].notes.as_ref().unwrap();
     assert_eq!(notes.iter().map(pptdif::model::Paragraph::text).collect::<Vec<_>>(), ["Open with the timeline."]);
+}
+
+#[test]
+fn pictures_tables_charts_and_comments() {
+    let deck = deck();
+    let picture = &deck.slides[1].shapes[2];
+    let image = picture.image.as_ref().unwrap();
+    assert_eq!(image.part.as_deref(), Some("ppt/media/image1.png"));
+    assert!(image.hash.is_some());
+    // AddPicture(left 600 pt, top 300 pt, 80 x 80 pt) is written in EMU.
+    let g = picture.geometry.unwrap();
+    assert_eq!((g.x, g.y, g.cx, g.cy), (7_620_000, 3_810_000, 1_016_000, 1_016_000));
+    // A text box PowerPoint adds says it has no fill.
+    assert_eq!(deck.slides[1].shapes[3].children[0].fill.as_deref(), Some("noFill{}"));
+
+    let table = deck.slides[2].shapes[1].table.as_ref().unwrap();
+    let cells: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .map(|r| r.iter().map(|c| c.text.iter().map(pptdif::model::Paragraph::text).collect()).collect())
+        .collect();
+    assert_eq!(cells, [["Item", "Cost"], ["Timber", "120"], ["Steel", "80"]]);
+
+    // AddChart2's default data: three series over four categories, cached
+    // in the chart part.
+    let chart = deck.slides[2].shapes[2].chart.as_ref().unwrap().data.as_ref().unwrap();
+    assert_eq!(chart.kinds, ["barChart"]);
+    assert_eq!(chart.series.len(), 3);
+    assert_eq!(chart.series[0].name.as_deref(), Some("Series 1"));
+    assert_eq!(chart.series[0].categories, ["Category 1", "Category 2", "Category 3", "Category 4"]);
+    assert_eq!(chart.series[0].values, [Some(4.3), Some(2.5), Some(3.5), Some(4.5)]);
+
+    // A modern comment's author comes from ppt/authors.xml; removing
+    // personal information renames it "Author".
+    let comment = &deck.slides[3].comments[0];
+    assert_eq!((comment.author.as_deref(), comment.text.as_str()), (Some("Author"), "Check the totals."));
 }
 
 #[test]
