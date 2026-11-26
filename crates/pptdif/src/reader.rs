@@ -456,6 +456,12 @@ fn resolve_parts<R: Read + Seek>(
 ) -> Result<(), Error> {
     for shape in shapes {
         resolve_parts(pkg, &mut shape.children, rels, ctx)?;
+        // A linked picture has no part: its target address is what it is.
+        if let Some(image) = &mut shape.image
+            && let Some(rel) = rels.get(image.rid.as_str()).filter(|r| r.external)
+        {
+            image.part = Some(rel.target.clone());
+        }
         if let Some(image) = &mut shape.image
             && let Some(rel) = rels.get(image.rid.as_str()).filter(|r| !r.external)
         {
@@ -662,9 +668,11 @@ fn read_shape_properties(parser: &mut Parser<'_>, shape: &mut Shape) -> Result<(
                     shape.outline = e.plain_attr("prst").map(str::to_owned);
                     parser.skip_element()?;
                 }
+                // A freeform's path is its outline: compared by a hash of
+                // its description, which can be long.
                 "custGeom" => {
-                    shape.outline = Some("custom".to_owned());
-                    parser.skip_element()?;
+                    let path = describe(parser, &e)?;
+                    shape.outline = Some(format!("custom:{:016x}", fnv(&[path.as_bytes()])));
                 }
                 "ln" => shape.line = Some(describe(parser, &e)?),
                 name if FILLS.contains(&name) => shape.fill = Some(describe(parser, &e)?),
@@ -948,9 +956,24 @@ fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Pa
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
                         p.level = number(&e, "lvl").unwrap_or(0);
-                        if let Some(a) = e.plain_attr("algn") {
-                            p.format.insert("align", a.to_owned());
+                        for (attr, key) in
+                            [("algn", "align"), ("marL", "marginLeft"), ("indent", "indent"), ("rtl", "rtl")]
+                        {
+                            if let Some(v) = e.plain_attr(attr) {
+                                p.format.insert(key, v.to_owned());
+                            }
                         }
+                    }
+                }
+                "lnSpc" | "spcBef" | "spcAft" => {
+                    let key = match e.name.as_str() {
+                        "lnSpc" => "lineSpacing",
+                        "spcBef" => "spaceBefore",
+                        _ => "spaceAfter",
+                    };
+                    let d = parser.describe_rest()?;
+                    if let Some(p) = paragraphs.last_mut() {
+                        p.format.insert(key, d);
                     }
                 }
                 "buNone" | "buChar" | "buAutoNum" | "buBlip" => {
