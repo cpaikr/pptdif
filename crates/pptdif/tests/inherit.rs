@@ -212,3 +212,69 @@ fn a_logo_on_the_master_is_a_master_change() {
     let c = compare(&with(""), &with(&placed_box(9, "Logo", "Harbour Co", (0, 0, INCH, INCH), "")));
     assert_eq!(objects_of(&c), [(Kind::Master, "shapes")]);
 }
+
+#[test]
+fn a_slide_moved_between_two_layouts_of_one_name_is_reported() {
+    let on = |layout: usize| {
+        let raw = RawDeck::new()
+            .layout_names(&["Content", "Content"])
+            .layout_shapes(0, &placeholder_def(2, "Title 1", ("title", 0), (0, 0, 8 * INCH, INCH), ""))
+            .layout_shapes(1, &placeholder_def(2, "Title 1", ("title", 0), (0, 3 * INCH, 8 * INCH, INCH), ""))
+            .slide(RawSlide::new(layout, &title("Harbour")));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    let c = compare(&on(0), &on(1));
+    let kinds: Vec<Kind> = changes(&c).iter().map(|c| c.kind).collect();
+    assert_eq!(kinds, [Kind::Slide, Kind::Geometry], "{:?}", changes(&c));
+    assert_eq!(changes(&c)[0].properties[0].name, "layout");
+}
+
+#[test]
+fn a_banner_on_a_layout_is_a_layout_change() {
+    let with = |banner: &str| {
+        let raw = RawDeck::new().layout_shapes(1, banner).slide(slide(""));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    let c = compare(&with(""), &with(&placed_box(9, "Banner", "Draft", (0, 0, INCH, INCH), "")));
+    assert_eq!(objects_of(&c), [(Kind::Layout, "shapes")]);
+}
+
+#[test]
+fn an_explicit_index_zero_takes_the_layouts_index_zero() {
+    let layout = placeholder_def(5, "Body 0", ("body", 0), (2 * INCH, 2 * INCH, INCH, INCH), "");
+    let on_slide = r#"<p:sp><p:nvSpPr><p:cNvPr id="4" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph idx="0"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let d = pptdif::read_bytes(RawDeck::new().layout_shapes(1, &layout).slide(RawSlide::new(1, on_slide)).to_bytes())
+        .unwrap();
+    assert_eq!(d.slides[0].shapes[0].effective_geometry.map(|g| g.x), Some(2 * INCH));
+}
+
+#[test]
+fn a_template_nudge_within_the_tolerance_is_no_change() {
+    let at = |y: i64| {
+        let raw = RawDeck::new()
+            .layout_shapes(1, &placeholder_def(2, "Title 1", ("title", 0), (0, y, 8 * INCH, INCH), ""))
+            .slide(slide(""));
+        pptdif::read_bytes(raw.to_bytes()).unwrap()
+    };
+    assert!(compare(&at(INCH), &at(INCH + 3_000)).objects.is_empty());
+}
+
+#[test]
+fn bullet_fonts_and_complex_theme_fonts_are_template_changes() {
+    let styles = |font: &str| {
+        format!(
+            r#"<p:titleStyle/><p:bodyStyle><a:lvl1pPr><a:buFont typeface="{font}"/><a:buChar char="•"/></a:lvl1pPr></p:bodyStyle><p:otherStyle/>"#
+        )
+    };
+    let with =
+        |font: &str| pptdif::read_bytes(RawDeck::new().master("", &styles(font)).slide(slide("")).to_bytes()).unwrap();
+    assert_eq!(objects_of(&compare(&with("Arial"), &with("Wingdings"))), [(Kind::Master, "bodyStyle")]);
+
+    let theme = |cs: &str| {
+        let fonts = format!(
+            r#"<a:fontScheme name="F"><a:majorFont><a:latin typeface="Georgia"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface="{cs}"/></a:minorFont></a:fontScheme>"#
+        );
+        pptdif::read_bytes(RawDeck::new().theme("T", &fonts).slide(slide("")).to_bytes()).unwrap()
+    };
+    assert_eq!(objects_of(&compare(&theme("Arial"), &theme("Tahoma"))), [(Kind::Theme, "minorFontComplex")]);
+}

@@ -61,7 +61,7 @@ impl<'a> Placeholders<'a> {
     /// index when it has one, else the one of its type.
     fn matching(&self, shape: &Shape) -> Option<&'a Shape> {
         let ph = shape.placeholder.as_ref()?;
-        let by_index = if ph.index == 0 { None } else { self.by_index.get(&ph.index).copied() };
+        let by_index = if ph.index == 0 && !ph.explicit_index { None } else { self.by_index.get(&ph.index).copied() };
         by_index.or_else(|| self.by_kind.get(ph.kind.as_str()).copied())
     }
 
