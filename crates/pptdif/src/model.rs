@@ -63,6 +63,9 @@ pub struct Placeholder {
     pub kind: String,
     /// `idx`, defaulting to 0.
     pub index: u32,
+    /// `idx` was written (an explicit 0 matches the layout's index 0).
+    #[serde(skip)]
+    pub explicit_index: bool,
 }
 
 /// Formatting as written, by property name (`bold`, `size`, `color`, ...),

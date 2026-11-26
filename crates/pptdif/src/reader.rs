@@ -342,6 +342,9 @@ fn read_master<R: Read + Seek>(pkg: &mut Package<R>, part: &str, ctx: &mut Conte
             _ => {}
         }
     }
+    // Pictures and charts on the master compare by content.
+    let targets: HashMap<&str, &Relationship> = rels.iter().map(|(k, r)| (k.as_str(), r)).collect();
+    resolve_parts(pkg, &mut def.shapes, &targets, ctx)?;
     if let Some(rel) = rels.values().find(|r| r.kind == "theme" && !r.external)
         && let Some(text) = pkg.read_text(&rel.target)?
     {
@@ -384,11 +387,14 @@ fn layout_index<R: Read + Seek>(
                 _ => {}
             }
         }
+        let rels = pkg.relationships(part)?;
         if def.master.is_none() {
-            let rels = pkg.relationships(part)?;
             def.master =
                 rels.iter().find(|r| r.kind == "slideMaster").and_then(|r| ctx.masters.get(&r.target).copied());
         }
+        // Pictures and charts on the layout compare by content.
+        let targets: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
+        resolve_parts(pkg, &mut def.shapes, &targets, ctx)?;
     }
     let index = ctx.template.layouts.len();
     ctx.template.layouts.push(def);
@@ -497,6 +503,12 @@ fn read_level(parser: &mut Parser<'_>, e: &Element) -> Result<LevelStyle, Error>
         match parser.next()? {
             Event::Start(c) => match c.name.as_str() {
                 "defRPr" => level.run = read_run_format(parser, &c)?,
+                "buFont" => {
+                    if let Some(face) = c.plain_attr("typeface") {
+                        level.paragraph.insert("bulletFont", face.to_owned());
+                    }
+                    parser.skip_element()?;
+                }
                 "lnSpc" | "spcBef" | "spcAft" => {
                     let key = match c.name.as_str() {
                         "lnSpc" => "lineSpacing",
@@ -1031,6 +1043,7 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                         shape.placeholder = Some(Placeholder {
                             kind: e.plain_attr("type").unwrap_or("obj").to_owned(),
                             index: number(&e, "idx").unwrap_or(0),
+                            explicit_index: e.plain_attr("idx").is_some(),
                         });
                     }
                     "graphicData" if kind == ShapeKind::OtherFrame => {
@@ -1180,6 +1193,12 @@ fn read_text_body_styled(
                     let d = parser.describe_rest()?;
                     if let Some(p) = paragraphs.last_mut() {
                         p.format.insert(key, d);
+                    }
+                }
+                "buFont" => {
+                    depth += 1;
+                    if let (Some(p), Some(face)) = (paragraphs.last_mut(), e.plain_attr("typeface")) {
+                        p.format.insert("bulletFont", face.to_owned());
                     }
                 }
                 "buNone" | "buChar" | "buAutoNum" | "buBlip" => {

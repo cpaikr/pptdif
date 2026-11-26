@@ -38,7 +38,9 @@ HTML report (M4) is next. See [PLAN.md](PLAN.md).
   geometry show the values in effect, inherited through the layout,
   master, theme, and default style; a slide reports them only where it
   writes something different, and a changed layout, master, or theme is
-  one change under `objects`.
+  one change under `objects`. A slide that moves to another layout reports
+  what it now inherits as well. Table styles, a paragraph's own `a:defRPr`,
+  and fills and lines a shape inherits are not read (see [TODO.md](TODO.md)).
 
 All accept `--format text`. Run `pptdif <command> --help` for details.
 

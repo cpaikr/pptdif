@@ -204,6 +204,15 @@ impl RawDeck {
     }
 
     /// Shapes (placeholders, usually) in the layout at `index`.
+    /// The layouts' names, replacing the two defaults; slides name layouts
+    /// by index into this list.
+    #[must_use]
+    pub fn layout_names(mut self, names: &[&str]) -> Self {
+        self.layouts = names.iter().map(|n| (*n).to_owned()).collect();
+        self.layout_shapes = vec![String::new(); names.len()];
+        self
+    }
+
     #[must_use]
     pub fn layout_shapes(mut self, index: usize, shapes_xml: &str) -> Self {
         shapes_xml.clone_into(&mut self.layout_shapes[index]);

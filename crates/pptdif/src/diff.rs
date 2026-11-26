@@ -768,15 +768,34 @@ fn fingerprint(slide: &Slide) -> u64 {
     hash(&described)
 }
 
-fn compare_slide(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
+fn compare_slide(
+    a: &Slide,
+    ai: usize,
+    b: &Slide,
+    bi: usize,
+    tolerance: i64,
+    layouts: (Option<&String>, Option<&String>),
+    work: &mut Work,
+) -> Vec<Change> {
     // A fixed orientation, as for the slides.
     if fingerprint(a) > fingerprint(b) {
-        return compare_slide_oriented(b, bi, a, ai, tolerance, work).into_iter().map(Change::mirrored).collect();
+        return compare_slide_oriented(b, bi, a, ai, tolerance, (layouts.1, layouts.0), work)
+            .into_iter()
+            .map(Change::mirrored)
+            .collect();
     }
-    compare_slide_oriented(a, ai, b, bi, tolerance, work)
+    compare_slide_oriented(a, ai, b, bi, tolerance, layouts, work)
 }
 
-fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance: i64, work: &mut Work) -> Vec<Change> {
+fn compare_slide_oriented(
+    a: &Slide,
+    ai: usize,
+    b: &Slide,
+    bi: usize,
+    tolerance: i64,
+    (ka, kb): (Option<&String>, Option<&String>),
+    work: &mut Work,
+) -> Vec<Change> {
     let mut changes = Vec::new();
     let slide_side = |slide: usize| Side { slide, shape: None, paragraph: None, text: None, row: None, column: None };
 
@@ -787,6 +806,10 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
     if a.layout != b.layout {
         let v = |l: &Option<std::sync::Arc<str>>| l.as_deref().map_or(Value::Null, Value::from);
         props.push(Property { name: "layout", base: v(&a.layout), other: v(&b.layout) });
+    } else if ka != kb {
+        // Two layouts of one name: told apart by master and occurrence.
+        let v = |k: Option<&String>| k.map_or(Value::Null, |k| Value::from(k.as_str()));
+        props.push(Property { name: "layout", base: v(ka), other: v(kb) });
     }
     if !props.is_empty() {
         let mut c = Change::new(Kind::Slide, Status::Changed, Some(slide_side(ai)), Some(slide_side(bi)));
@@ -795,7 +818,9 @@ fn compare_slide_oriented(a: &Slide, ai: usize, b: &Slide, bi: usize, tolerance:
     }
 
     let (la, lb) = (leaves(a), leaves(b));
-    work.inherited = a.layout != b.layout;
+    // A slide on another layout (by name, or one of two of a name)
+    // inherits from something else: what it inherits is reported.
+    work.inherited = a.layout != b.layout || ka != kb;
     let pairs = pair_shapes(&la, &lb, work);
     // Groups compare their own geometry: a group moved as a unit moves its
     // members without changing their coordinates inside it.
@@ -954,6 +979,7 @@ pub fn compare(
     let ia: Vec<Item> = base.slides.iter().map(slide_item).collect();
     let ib: Vec<Item> = other.slides.iter().map(slide_item).collect();
     let mut work = Work { fell_back: false, marker: Marker::new(), inherited: false };
+    let (layout_a, layout_b) = (objects::layout_keys(base), objects::layout_keys(other));
     let matched = match_slides(&ia, &ib, options.align, &mut work);
     let by_base: HashMap<usize, usize> = matched.pairs.iter().copied().collect();
     let paired_other: HashSet<usize> = matched.pairs.iter().map(|p| p.1).collect();
@@ -965,7 +991,8 @@ pub fn compare(
             {
                 let b = &other.slides[j];
                 let moved = matched.moved.contains(&(i, j));
-                let changes = compare_slide(a, i + 1, b, j + 1, options.tolerance, &mut work);
+                let keys = (layout_a.get(i).and_then(Option::as_ref), layout_b.get(j).and_then(Option::as_ref));
+                let changes = compare_slide(a, i + 1, b, j + 1, options.tolerance, keys, &mut work);
                 let status = if moved {
                     Status::Moved
                 } else if changes.is_empty() {
@@ -1013,7 +1040,7 @@ pub fn compare(
         assign_ids(pair);
     }
     let mut objects = objects::section_changes(base, other, &matched.pairs);
-    objects.extend(objects::template_changes(base, other));
+    objects.extend(objects::template_changes(base, other, options.tolerance));
     Comparison {
         base: DeckRef { file: base_file.to_owned(), slides: base.slides.len() },
         other: DeckRef { file: other_file.to_owned(), slides: other.slides.len() },
