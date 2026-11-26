@@ -5,10 +5,9 @@ holds what is left. Remove an item when it lands.
 
 ## Next
 
-- **M5.** The `pptdif` agent skill with evals, and a Windows x64 release
-  workflow (`v*` tags), as in xldif.
-- **Report:** group members are drawn in their group's child coordinates
-  (`chOff`/`chExt` are not applied), which matters only for scaled groups.
+- **First release.** The maintainer (`sjunepark`, the only actor the
+  release workflow accepts) picks the version and follows AGENTS.md,
+  Release (`Cargo.toml` and `Cargo.lock` committed before the tag).
 - **Inheritance not read:** table styles, a paragraph's own `a:defRPr`,
   and shape fills and lines inherited from the layout.
 - **Alignment on real decks.** Review slide pairing on real version pairs

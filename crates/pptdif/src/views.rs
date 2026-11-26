@@ -132,6 +132,7 @@ pub struct ParagraphView {
 pub struct ShapeText {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u32>,
+    pub kind: crate::model::ShapeKind,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
@@ -157,6 +158,43 @@ fn paragraphs(ps: &[crate::model::Paragraph]) -> Vec<ParagraphView> {
     ps.iter().map(|p| ParagraphView { level: p.level, text: p.text() }).collect()
 }
 
+/// A shape's text as lines: its paragraphs; a table's rows as `cell | cell`;
+/// a chart's title and each series as `name: category value, ...` (as the
+/// chart last drew them).
+fn shape_lines(shape: &crate::model::Shape) -> Vec<ParagraphView> {
+    let line = |text: String| ParagraphView { level: 0, text };
+    if let Some(table) = &shape.table {
+        return table
+            .rows
+            .iter()
+            .map(|row| {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|c| c.text.iter().map(crate::model::Paragraph::text).collect::<Vec<_>>().join(" "))
+                    .collect();
+                line(cells.join(" | "))
+            })
+            .collect();
+    }
+    if let Some(chart) = shape.chart.as_ref().and_then(|c| c.data.as_ref()) {
+        let mut out: Vec<ParagraphView> = chart.title.iter().map(|t| line(t.clone())).collect();
+        for s in &chart.series {
+            let points: Vec<String> = s
+                .values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let category = s.categories.get(i).map_or_else(|| (i + 1).to_string(), Clone::clone);
+                    format!("{category} {}", v.map_or_else(|| "-".to_owned(), |v| v.to_string()))
+                })
+                .collect();
+            out.push(line(format!("{}: {}", s.name.as_deref().unwrap_or("series"), points.join(", "))));
+        }
+        return out;
+    }
+    shape.text.as_deref().map(paragraphs).unwrap_or_default()
+}
+
 /// The `text` result: every shape with text, slide by slide, and the notes.
 /// `slide` keeps only that 1-based slide.
 pub fn text(file: &str, deck: &Presentation, slide: Option<usize>) -> TextListing {
@@ -171,15 +209,19 @@ pub fn text(file: &str, deck: &Presentation, slide: Option<usize>) -> TextListin
             shapes: s
                 .all_shapes()
                 .filter_map(|shape| {
-                    let ps = shape.text.as_ref().filter(|ps| ps.iter().any(|p| !p.text().is_empty()))?;
+                    let lines = shape_lines(shape);
+                    if lines.iter().all(|l| l.text.is_empty()) {
+                        return None;
+                    }
                     Some(ShapeText {
                         id: shape.id,
+                        kind: shape.kind,
                         name: shape.name.clone(),
                         placeholder: shape
                             .placeholder
                             .as_ref()
                             .map(|p| if p.index == 0 { p.kind.clone() } else { format!("{}:{}", p.kind, p.index) }),
-                        paragraphs: paragraphs(ps),
+                        paragraphs: lines,
                     })
                 })
                 .collect(),

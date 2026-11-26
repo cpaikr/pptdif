@@ -1,0 +1,21 @@
+{
+  "skill_name": "pptdif",
+  "policy": "implicit",
+  "rationale": "Comparing presentation versions is frequent in advisory and audit work and the vocabulary (two decks, versions, what changed, pptx) is distinctive; near misses guard against editing, creating, converting, and non-PowerPoint formats.",
+  "should_trigger": [
+    "이 두 PPT 파일(v1.pptx, v2.pptx) 뭐가 달라졌는지 비교해 줘",
+    "Compare the client's revised board pack with last week's version.",
+    "제안서 260318 버전이랑 최종본 슬라이드 차이 보고서 만들어 줘",
+    "Which slides changed between pitch_v3.pptx and pitch_v4.pptx?",
+    "Show me side by side what changed in the updated deck.pptx",
+    "두 발표자료에서 숫자 바뀐 슬라이드만 알려줘"
+  ],
+  "should_not_trigger": [
+    "Add a summary slide to deck.pptx",
+    "이 PPT 디자인 좀 예쁘게 바꿔줘",
+    "Convert this presentation to PDF",
+    "두 PDF 감사보고서 차이 비교해 줘",
+    "Compare these two Excel workbooks",
+    "Merge the two Google Slides decks into one"
+  ]
+}

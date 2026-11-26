@@ -10,7 +10,7 @@ must respect.
 
 ```text
 skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ──► crates/pptdif
-  routing, judgment (planned)                   process contract     deck rules
+  routing, judgment                             process contract     deck rules
 ```
 
 - [`crates/pptdif`](crates/pptdif/src/lib.rs) owns every presentation rule
@@ -49,6 +49,8 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   `package.rs`, `xml.rs`, `align.rs`, and `error.rs` were copied from
   xldif at `8b272fd` and say so in their headers (PLAN.md, "Relation to
   xldif").
+- The [`pptdif` skill](skills/pptdif/SKILL.md) never reads decks itself:
+  it chooses commands, reads envelopes, and owns what to report.
 - [`crates/pptdif-cli`](crates/pptdif-cli/src/main.rs) parses arguments
   (clap), runs one command, and writes one stdout document
   ([envelope.rs](crates/pptdif-cli/src/envelope.rs)). It also owns the one

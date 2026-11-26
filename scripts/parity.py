@@ -100,7 +100,9 @@ def ours(exe: str, path: str) -> list[dict] | None:
         return None
     slides = []
     for s, t in zip(inspected["slides"], listed["slides"]):
-        texts = [p["text"] for shape in t["shapes"] for p in shape["paragraphs"] if p["text"].strip()]
+        # Tables and charts are listed by `text` but are not text frames to python-pptx.
+        frames = [shape for shape in t["shapes"] if shape.get("kind") not in ("table", "chart")]
+        texts = [p["text"] for shape in frames for p in shape["paragraphs"] if p["text"].strip()]
         notes = [p["text"] for p in (t.get("notes") or []) if p["text"].strip()]
         slides.append({**{k: s[k] for k in FIELDS if k not in TEXT}, "text": sorted(texts), "notesText": notes})
     return slides

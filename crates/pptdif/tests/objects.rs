@@ -462,3 +462,20 @@ fn deck_level_changes_share_the_limit() {
     assert_eq!((listing.listed, listing.objects.len()), (2, 2));
     assert_eq!(listing.omitted["objects"]["section"], 4);
 }
+
+#[test]
+fn the_text_view_shows_table_rows_and_chart_series() {
+    let slide =
+        one(&[table(6, "Costs", &[&["Item", "Cost"], &["Steel", "95"]]), chart_frame(7, "Chart 6", "rIdC")].concat())
+            .part(
+                "rIdC",
+                "chart",
+                "charts/chart1.xml",
+                chart_part(&["Q1", "Q2"], &[("Spend", &[10.0, 14.0])]).as_bytes(),
+            );
+    let d = deck(vec![slide]);
+    let listing = pptdif::views::text("d.pptx", &d, None);
+    let lines: Vec<&str> =
+        listing.slides[0].shapes.iter().flat_map(|s| s.paragraphs.iter().map(|p| p.text.as_str())).collect();
+    assert_eq!(lines, ["Site plan", "Item | Cost", "Steel | 95", "Spend: Q1 10, Q2 14"]);
+}
