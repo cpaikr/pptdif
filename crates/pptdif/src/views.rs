@@ -70,7 +70,7 @@ fn summarize(index: usize, slide: &Slide, section: Option<&str>) -> SlideSummary
         tables: 0,
         charts: 0,
         notes: slide.notes.is_some(),
-        comments: slide.comments,
+        comments: slide.comments.len(),
     };
     for shape in slide.all_shapes() {
         match shape.kind {

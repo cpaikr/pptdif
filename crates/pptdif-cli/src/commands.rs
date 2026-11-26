@@ -46,7 +46,12 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 Format::Text => Output::Text(text_text(&listing, &warnings)),
             })
         }
-        Command::Compare { base, other, slide, kind, limit, all, align, format } => {
+        Command::Compare { base, other, slide, kind, limit, all, tolerance, align, format } => {
+            if !(tolerance >= 0.0 && tolerance.is_finite()) {
+                return Err(
+                    Error::new(ErrorCode::InvalidArgument, "--tolerance must be a finite number of 0 or more").into()
+                );
+            }
             let (a, b) = (pptdif::read_path(&base)?, pptdif::read_path(&other)?);
             check_slide(slide, &[&a, &b])?;
             let (fa, fb) = (file_label(&base), file_label(&other));
@@ -55,6 +60,8 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     Align::Content => AlignMode::Content,
                     Align::Position => AlignMode::Position,
                 },
+                // Points to EMU; a tolerance past i64 is no tolerance at all.
+                tolerance: (tolerance * 12_700.0).round().min(9.0e18) as i64,
             };
             let comparison = diff::compare(&fa, &a, &fb, &b, options);
             let filter = Filter { slide, kinds: kind.into_iter().map(kind_of).collect(), limit, all };
@@ -89,6 +96,13 @@ const fn kind_of(kind: Kind) -> diff::Kind {
         Kind::Shape => diff::Kind::Shape,
         Kind::Text => diff::Kind::Text,
         Kind::Notes => diff::Kind::Notes,
+        Kind::Geometry => diff::Kind::Geometry,
+        Kind::Format => diff::Kind::Format,
+        Kind::Table => diff::Kind::Table,
+        Kind::Picture => diff::Kind::Picture,
+        Kind::Chart => diff::Kind::Chart,
+        Kind::Comment => diff::Kind::Comment,
+        Kind::Section => diff::Kind::Section,
     }
 }
 
@@ -177,6 +191,18 @@ fn side_label(side: &Side) -> String {
     if let Some(p) = side.paragraph {
         let _ = write!(out, " para {p}");
     }
+    match (side.row, side.column) {
+        (Some(r), Some(c)) => {
+            let _ = write!(out, " cell {r},{c}");
+        }
+        (Some(r), None) => {
+            let _ = write!(out, " row {r}");
+        }
+        (None, Some(c)) => {
+            let _ = write!(out, " column {c}");
+        }
+        (None, None) => {}
+    }
     out
 }
 
@@ -229,6 +255,13 @@ fn compare_text(listing: &Listing, warnings: &[Warning]) -> String {
         for c in &pair.changes {
             let _ = writeln!(out, "{}", change_line(c));
         }
+    }
+    for o in &listing.objects {
+        let mut line = format!("{}\t{}\t{:?}", o.id, o.kind.as_str(), o.status);
+        for p in &o.properties {
+            let _ = write!(line, "\t{}: {} => {}", p.name, escape(&p.base.to_string()), escape(&p.other.to_string()));
+        }
+        let _ = writeln!(out, "{line}");
     }
     let omitted: usize = listing.omitted.values().flat_map(|m| m.values()).sum();
     if omitted > 0 {

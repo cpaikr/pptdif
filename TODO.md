@@ -5,10 +5,9 @@ holds what is left. Remove an item when it lands.
 
 ## Next
 
-- **M2.** Geometry with a tolerance, tables, pictures by image hash,
-  charts' cached data, comments, sections, z-order and grouping, and the
-  formatting written on runs and paragraphs; picture hashes and table text
-  as slide tokens.
+- **M3.** Resolve inherited formatting and placeholder geometry through
+  the layout, master, and theme; compare layouts, masters, and the theme;
+  check against PowerPoint (`TextRange.Font`, `Shape.Left/Top`).
 - **Alignment on real decks.** Review slide pairing on real version pairs
   once `fixtures/private/` has some; tune boilerplate (footers, logos)
   that repeats on most slides out of the slide tokens if it misleads.

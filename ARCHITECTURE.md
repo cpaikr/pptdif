@@ -30,9 +30,14 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   - [align.rs](crates/pptdif/src/align.rs): sequence alignment (anchors on
     unique content, similarity in the gaps, moves), for slides and
     paragraphs;
+  - [chart.rs](crates/pptdif/src/chart.rs): a chart part's cached data
+    (kinds, title, series names, categories, values);
   - [diff.rs](crates/pptdif/src/diff.rs): the comparison: slide pairing
     (alignment, then order-free pairing of what is left), shape pairing,
-    paragraph changes, ids, and the `compare` listing;
+    paragraph changes, ids, and the `compare` listing, over
+    [diff/objects.rs](crates/pptdif/src/diff/objects.rs) (geometry,
+    formatting of unchanged text, pictures, tables, charts, z-order and
+    groups, comments, sections);
   - [error.rs](crates/pptdif/src/error.rs): stable error categories.
 
   `package.rs`, `xml.rs`, `align.rs`, and `error.rs` were copied from
@@ -42,8 +47,10 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   (clap), runs one command, and writes one stdout document
   ([envelope.rs](crates/pptdif-cli/src/envelope.rs)).
 - [`crates/pptdif-fixtures`](crates/pptdif-fixtures/src/lib.rs) assembles
-  synthetic decks from hand-written XML parts for tests. No shipped crate
-  depends on it.
+  synthetic decks from hand-written XML parts (and image and chart parts)
+  for tests. No shipped crate depends on it.
+- `cargo run -p pptdif --example dump -- DECK` prints the model, for
+  checking the reader by eye.
 
 ## Invariants
 
@@ -75,6 +82,13 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   changes share one.
 - **Fields are not edits.** A field compares by its kind, not the text
   PowerPoint saved for it.
+- **Formatting as written.** Run, paragraph, and shape formatting is what
+  the file states; an absent property is inherited and compares as absent
+  until M3 resolves inheritance. Formatting is compared only on paragraphs
+  whose text did not change, and geometry only where both sides write an
+  `xfrm`.
+- **Pictures by content.** An image compares by a hash of its bytes, so
+  the same picture under another part name is no change.
 
 ## Process contract
 
@@ -110,6 +124,11 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd` and
   edited and added, renumbered fields, shape pairing, notes, visibility,
   the listing, and two properties over random decks: a deck against itself
   shows nothing, and swapping the files mirrors the result.
+- [`crates/pptdif/tests/objects.rs`](crates/pptdif/tests/objects.rs)
+  covers geometry and its tolerance, formatting of one word, paragraph
+  alignment and fills, replaced and renamed images, table cells, rows, and
+  columns, chart series, z-order and grouping, comments, sections, and
+  their mirroring.
 - [`scripts/parity.py`](scripts/parity.py) compares each slide's id,
   layout, visibility, notes, and shape counts with python-pptx, an
   independent reader.

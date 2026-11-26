@@ -109,8 +109,8 @@ fn hidden_slides_notes_comments_and_animations() {
         .slide(RawSlide::new(1, "").hidden().comments(2).animated());
     let deck = read_bytes(deck.to_bytes()).unwrap();
     let (a, b) = (&deck.slides[0], &deck.slides[1]);
-    assert!(a.notes.is_some() && !a.hidden && a.comments == 0 && !a.animated);
-    assert!(b.notes.is_none() && b.hidden && b.comments == 2 && b.animated);
+    assert!(a.notes.is_some() && !a.hidden && a.comments.is_empty() && !a.animated);
+    assert!(b.notes.is_none() && b.hidden && b.comments.len() == 2 && b.animated);
     assert!(deck.warnings[0].message.contains("1 slide's animations"), "{}", deck.warnings[0].message);
 }
 
@@ -220,7 +220,7 @@ fn an_empty_custom_show_list_defines_no_show() {
 #[test]
 fn legacy_replies_are_not_counted_as_comments() {
     let deck = RawDeck::new().slide(RawSlide::new(0, "").comments(1).replies(2));
-    assert_eq!(read_bytes(deck.to_bytes()).unwrap().slides[0].comments, 1);
+    assert_eq!(read_bytes(deck.to_bytes()).unwrap().slides[0].comments.len(), 1);
 }
 
 #[test]

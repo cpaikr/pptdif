@@ -11,8 +11,10 @@ use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::align::fnv;
 use crate::model::{
-    DeckFormat, Master, Paragraph, Placeholder, Presentation, Run, Section, Shape, ShapeKind, Size, Slide, Warning,
+    Cell, ChartRef, Comment, DeckFormat, Format, Geometry, Image, Master, Paragraph, Placeholder, Presentation, Run,
+    RunKind, Section, Shape, ShapeKind, Size, Slide, Table, Warning,
 };
 use crate::package::{Limits, Package, Relationship};
 use crate::xml::{Element, Event, Parser};
@@ -41,13 +43,13 @@ fn missing(part: &str) -> Error {
 /// Counts records (slides, shapes, comments) against
 /// [`Limits::max_records`], so memory stays proportional to the limit
 /// whatever the file's compression ratio.
-struct Budget {
+pub(crate) struct Budget {
     left: usize,
     limit: usize,
 }
 
 impl Budget {
-    fn take(&mut self) -> Result<(), Error> {
+    pub(crate) fn take(&mut self) -> Result<(), Error> {
         self.left = self.left.checked_sub(1).ok_or_else(|| {
             Error::new(ErrorCode::InvalidArchive, format!("the presentation holds more than {} records", self.limit))
         })?;
@@ -157,13 +159,14 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
     let mut unread = Unread { custom_shows: listing.custom_shows, ..Unread::default() };
     unread.vba = rels.values().any(|r| r.kind == "vbaProject");
 
-    let mut layouts = LayoutNames::default();
+    let authors = read_authors(pkg, &rels, &mut budget)?;
+    let mut ctx = Context { budget, layouts: LayoutNames::default(), images: HashMap::new(), authors };
     let mut masters = Vec::new();
     // A master listed twice is read once.
     let mut seen_masters = HashSet::new();
     for rid in listing.master_rids.iter().filter(|rid| seen_masters.insert(rid.as_str())) {
         let Some(rel) = rels.get(rid).filter(|r| r.kind == "slideMaster" && !r.external) else { continue };
-        masters.push(read_master(pkg, &rel.target, &mut layouts, &mut budget)?);
+        masters.push(read_master(pkg, &rel.target, &mut ctx.layouts, &mut ctx.budget)?);
     }
 
     let mut slides = Vec::new();
@@ -180,7 +183,7 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
                 format!("{main}: {} is listed as more than one slide", rel.target),
             ));
         }
-        let slide = read_slide(pkg, &rel.target, *id, &mut layouts, &mut budget)?;
+        let slide = read_slide(pkg, &rel.target, *id, &mut ctx)?;
         unread.count_shapes(&slide);
         slides.push(slide);
     }
@@ -341,13 +344,52 @@ fn read_master<R: Read + Seek>(
     Ok(Master { name, layouts })
 }
 
-fn read_slide<R: Read + Seek>(
+/// What reading every slide shares: the record budget, layout names, image
+/// hashes, and comment authors.
+struct Context {
+    budget: Budget,
+    layouts: LayoutNames,
+    /// Content hashes by image part, so a picture used on many slides is
+    /// read once.
+    images: HashMap<String, Option<u64>>,
+    /// Comment authors: `m:<guid>` for modern comments, `l:<id>` for legacy.
+    authors: HashMap<String, String>,
+}
+
+/// Comment authors from `ppt/authors.xml` (modern) and
+/// `ppt/commentAuthors.xml` (legacy), named by the presentation's
+/// relationships.
+fn read_authors<R: Read + Seek>(
     pkg: &mut Package<R>,
-    part: &str,
-    id: u32,
-    layouts: &mut LayoutNames,
+    rels: &HashMap<String, Relationship>,
     budget: &mut Budget,
-) -> Result<Slide, Error> {
+) -> Result<HashMap<String, String>, Error> {
+    let mut authors = HashMap::new();
+    for rel in rels.values().filter(|r| !r.external) {
+        let prefix = match rel.kind.as_str() {
+            "authors" => "m",
+            "commentAuthors" => "l",
+            _ => continue,
+        };
+        let Some(text) = pkg.read_text(&rel.target)? else { continue };
+        let mut parser = Parser::new(&text, &rel.target);
+        loop {
+            match parser.next()? {
+                Event::Start(e) if e.name == "author" || e.name == "cmAuthor" => {
+                    if let (Some(id), Some(name)) = (e.plain_attr("id"), e.plain_attr("name")) {
+                        budget.take()?;
+                        authors.insert(format!("{prefix}:{id}"), name.to_owned());
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    Ok(authors)
+}
+
+fn read_slide<R: Read + Seek>(pkg: &mut Package<R>, part: &str, id: u32, ctx: &mut Context) -> Result<Slide, Error> {
     let text = pkg.read_text(part)?.ok_or_else(|| missing(part))?;
     let rels = pkg.relationships(part)?;
     let mut slide = Slide {
@@ -357,7 +399,7 @@ fn read_slide<R: Read + Seek>(
         layout: None,
         shapes: Vec::new(),
         notes: None,
-        comments: 0,
+        comments: Vec::new(),
         animated: false,
     };
     let mut parser = Parser::new(&text, part);
@@ -366,7 +408,7 @@ fn read_slide<R: Read + Seek>(
             Event::Start(e) => match e.name.as_str() {
                 // Hidden slides carry `show="0"` on the root.
                 "sld" => slide.hidden = matches!(e.plain_attr("show"), Some("0" | "false")),
-                "spTree" => slide.shapes = read_shape(&mut parser, ShapeKind::Group, budget)?.children,
+                "spTree" => slide.shapes = read_shape(&mut parser, ShapeKind::Group, &mut ctx.budget)?.children,
                 "timing" => slide.animated = true,
                 _ => {}
             },
@@ -374,12 +416,14 @@ fn read_slide<R: Read + Seek>(
             _ => {}
         }
     }
+    let targets: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
+    resolve_parts(pkg, &mut slide.shapes, &targets, ctx)?;
     for rel in rels.iter().filter(|r| !r.external) {
         match rel.kind.as_str() {
-            "slideLayout" => slide.layout = layouts.get(pkg, &rel.target)?,
+            "slideLayout" => slide.layout = ctx.layouts.get(pkg, &rel.target)?,
             "notesSlide" => {
                 let notes = match pkg.read_text(&rel.target)? {
-                    Some(text) => read_notes(&text, &rel.target, budget)?,
+                    Some(text) => read_notes(&text, &rel.target, &mut ctx.budget)?,
                     None => Vec::new(),
                 };
                 slide.notes = Some(notes);
@@ -389,7 +433,7 @@ fn read_slide<R: Read + Seek>(
             // unverified; TODO.md).
             "comments" => {
                 if let Some(text) = pkg.read_text(&rel.target)? {
-                    slide.comments += count_comments(&text, &rel.target, budget)?;
+                    slide.comments.extend(read_comments(&text, &rel.target, &ctx.authors, &mut ctx.budget)?);
                 }
             }
             _ => {}
@@ -398,22 +442,130 @@ fn read_slide<R: Read + Seek>(
     Ok(slide)
 }
 
-/// Comments without their replies. A modern comment keeps its replies in
-/// `p188:replyLst`; a legacy reply is a `cm` of its own whose
+/// Fills in what shapes name by relationship: each picture's image part
+/// and content hash, and each chart's cached data.
+fn resolve_parts<R: Read + Seek>(
+    pkg: &mut Package<R>,
+    shapes: &mut [Shape],
+    rels: &HashMap<&str, &Relationship>,
+    ctx: &mut Context,
+) -> Result<(), Error> {
+    for shape in shapes {
+        resolve_parts(pkg, &mut shape.children, rels, ctx)?;
+        if let Some(image) = &mut shape.image
+            && let Some(rel) = rels.get(image.rid.as_str()).filter(|r| !r.external)
+        {
+            let hash = if let Some(hash) = ctx.images.get(&rel.target) {
+                *hash
+            } else {
+                let hash = pkg.read_bytes(&rel.target)?.map(|bytes| fnv(&[&bytes]));
+                ctx.images.insert(rel.target.clone(), hash);
+                hash
+            };
+            image.part = Some(rel.target.clone());
+            image.hash = hash;
+        }
+        if let Some(chart) = &mut shape.chart
+            && let Some(rel) = rels.get(chart.rid.as_str()).filter(|r| r.kind == "chart" && !r.external)
+            && let Some(text) = pkg.read_text(&rel.target)?
+        {
+            chart.data = Some(crate::chart::read_chart(&text, &rel.target, &mut ctx.budget)?);
+        }
+    }
+    Ok(())
+}
+
+/// A slide's comments, each with its replies. A modern comment keeps its
+/// replies in `p188:replyLst`; a legacy reply is a `cm` of its own whose
 /// `p15:threadingInfo` names a `parentCm` (unverified; TODO.md).
-fn count_comments(text: &str, part: &str, budget: &mut Budget) -> Result<usize, Error> {
+fn read_comments(
+    text: &str,
+    part: &str,
+    authors: &HashMap<String, String>,
+    budget: &mut Budget,
+) -> Result<Vec<Comment>, Error> {
+    struct Open {
+        author_id: Option<String>,
+        legacy_index: Option<String>,
+        parent: Option<(String, String)>,
+        text: String,
+        replies: Vec<String>,
+    }
+    // Modern author ids are GUIDs and legacy ones numbers, so one lookup
+    // in each table cannot confuse them.
+    let author = |id: Option<&str>| -> Option<String> {
+        let id = id?;
+        authors.get(&format!("m:{id}")).or_else(|| authors.get(&format!("l:{id}"))).cloned()
+    };
     let mut parser = Parser::new(text, part);
-    let mut n = 0;
-    let mut reply = false;
+    let mut comments: Vec<Comment> = Vec::new();
+    // Legacy comments by `(authorId, idx)`, for replies to find them.
+    let mut legacy: HashMap<(String, String), usize> = HashMap::new();
+    let mut open: Option<Open> = None;
+    let mut reply_author: Option<String> = None;
     loop {
         match parser.next()? {
-            Event::Start(e) if e.name == "cm" => {
-                budget.take()?;
-                reply = false;
+            Event::Start(e) => match e.name.as_str() {
+                "cm" => {
+                    budget.take()?;
+                    open = Some(Open {
+                        author_id: e.plain_attr("authorId").map(str::to_owned),
+                        legacy_index: e.plain_attr("idx").map(str::to_owned),
+                        parent: None,
+                        text: String::new(),
+                        replies: Vec::new(),
+                    });
+                }
+                "parentCm" => {
+                    if let (Some(o), Some(a), Some(i)) = (open.as_mut(), e.plain_attr("authorId"), e.plain_attr("idx"))
+                    {
+                        o.parent = Some((a.to_owned(), i.to_owned()));
+                    }
+                }
+                "text" => {
+                    let body = parser.text_until_end(&[])?;
+                    if let Some(o) = open.as_mut() {
+                        o.text = body;
+                    }
+                }
+                "reply" => {
+                    budget.take()?;
+                    reply_author = Some(e.plain_attr("authorId").unwrap_or_default().to_owned());
+                }
+                "txBody" => {
+                    let body: Vec<String> = read_text_body(&mut parser, budget)?.iter().map(Paragraph::text).collect();
+                    let body = body.join("\n");
+                    let Some(o) = open.as_mut() else { continue };
+                    match &reply_author {
+                        Some(id) => o.replies.push(match author(Some(id)) {
+                            Some(name) => format!("{name}: {body}"),
+                            None => body,
+                        }),
+                        None => o.text = body,
+                    }
+                }
+                _ => {}
+            },
+            Event::End(name) if name == "reply" => reply_author = None,
+            Event::End(name) if name == "cm" => {
+                let Some(o) = open.take() else { continue };
+                let name = author(o.author_id.as_deref());
+                if let Some(parent) = &o.parent
+                    && let Some(&k) = legacy.get(parent)
+                {
+                    let reply = match name {
+                        Some(name) => format!("{name}: {}", o.text),
+                        None => o.text,
+                    };
+                    comments[k].replies.push(reply);
+                    continue;
+                }
+                if let (Some(a), Some(i)) = (o.author_id.clone(), o.legacy_index.clone()) {
+                    legacy.insert((a, i), comments.len());
+                }
+                comments.push(Comment { author: name, text: o.text, replies: o.replies });
             }
-            Event::Start(e) if e.name == "parentCm" => reply = true,
-            Event::End(name) if name == "cm" && !reply => n += 1,
-            Event::Eof => return Ok(n),
+            Event::Eof => return Ok(comments),
             _ => {}
         }
     }
@@ -444,6 +596,161 @@ fn frame_kind(uri: &str) -> ShapeKind {
     }
 }
 
+/// Fill elements of a shape's properties.
+const FILLS: &[&str] = &["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"];
+
+/// An element's attributes and content, described canonically: attribute
+/// order and whitespace do not change it.
+fn describe(parser: &mut Parser<'_>, e: &Element) -> Result<String, Error> {
+    let mut attrs: Vec<String> = e.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    attrs.sort();
+    let rest = parser.describe_rest()?;
+    Ok(if attrs.is_empty() {
+        format!("{}{{{rest}}}", e.name)
+    } else {
+        format!("{}({}){{{rest}}}", e.name, attrs.join(","))
+    })
+}
+
+/// `xfrm` (`a:xfrm` in shape properties, `p:xfrm` on a graphic frame),
+/// its start tag just read, through its end tag.
+fn read_xfrm(parser: &mut Parser<'_>, e: &Element) -> Result<Geometry, Error> {
+    let flag = |name: &str| matches!(e.plain_attr(name), Some("1" | "true"));
+    let mut g = Geometry {
+        rotation: number(e, "rot").unwrap_or(0),
+        flip_h: flag("flipH"),
+        flip_v: flag("flipV"),
+        ..Geometry::default()
+    };
+    let mut depth = 1usize;
+    loop {
+        match parser.next()? {
+            Event::Start(c) => {
+                depth += 1;
+                match c.name.as_str() {
+                    "off" if depth == 2 => (g.x, g.y) = (number(&c, "x").unwrap_or(0), number(&c, "y").unwrap_or(0)),
+                    "ext" if depth == 2 => {
+                        (g.cx, g.cy) = (number(&c, "cx").unwrap_or(0), number(&c, "cy").unwrap_or(0));
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(g);
+                }
+            }
+            Event::Text(_) => {}
+            Event::Eof => return Ok(g),
+        }
+    }
+}
+
+/// A shape's own properties (`spPr`, `grpSpPr`), its start tag just read:
+/// geometry, outline, fill, and line.
+fn read_shape_properties(parser: &mut Parser<'_>, shape: &mut Shape) -> Result<(), Error> {
+    loop {
+        match parser.next()? {
+            Event::Start(e) => match e.name.as_str() {
+                "xfrm" => shape.geometry = Some(read_xfrm(parser, &e)?),
+                "prstGeom" => {
+                    shape.outline = e.plain_attr("prst").map(str::to_owned);
+                    parser.skip_element()?;
+                }
+                "custGeom" => {
+                    shape.outline = Some("custom".to_owned());
+                    parser.skip_element()?;
+                }
+                "ln" => shape.line = Some(describe(parser, &e)?),
+                name if FILLS.contains(&name) => shape.fill = Some(describe(parser, &e)?),
+                _ => parser.skip_element()?,
+            },
+            Event::End(_) | Event::Eof => return Ok(()),
+            Event::Text(_) => {}
+        }
+    }
+}
+
+/// A picture's `blipFill`, its start tag just read: the image's
+/// relationship and any crop.
+fn read_blip_fill(parser: &mut Parser<'_>) -> Result<Option<Image>, Error> {
+    let mut image: Option<Image> = None;
+    let mut crop = None;
+    let mut depth = 1usize;
+    loop {
+        match parser.next()? {
+            Event::Start(e) => {
+                depth += 1;
+                match e.name.as_str() {
+                    "blip" => {
+                        let rid = e.prefixed_attr("embed").or_else(|| e.prefixed_attr("link"));
+                        image = rid.map(|rid| Image { rid: rid.to_owned(), part: None, hash: None, crop: None });
+                    }
+                    "srcRect" if !e.attrs.is_empty() => {
+                        let mut parts: Vec<String> = e.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                        parts.sort();
+                        crop = Some(parts.join(","));
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(image.map(|i| Image { crop, ..i }));
+                }
+            }
+            Event::Text(_) => {}
+            Event::Eof => return Ok(image),
+        }
+    }
+}
+
+/// A table (`a:tbl`), its start tag just read: rows of cells with text.
+fn read_table(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Table, Error> {
+    let mut table = Table::default();
+    let mut cell: Option<Cell> = None;
+    let mut depth = 1usize;
+    loop {
+        match parser.next()? {
+            Event::Start(e) => match e.name.as_str() {
+                "tr" => {
+                    budget.take()?;
+                    depth += 1;
+                    table.rows.push(Vec::new());
+                }
+                "tc" => {
+                    budget.take()?;
+                    depth += 1;
+                    let flag = |name: &str| matches!(e.plain_attr(name), Some("1" | "true"));
+                    cell = Some(Cell { text: Vec::new(), merged: flag("hMerge") || flag("vMerge") });
+                }
+                "txBody" => {
+                    let text = read_text_body(parser, budget)?;
+                    if let Some(c) = cell.as_mut() {
+                        c.text = text;
+                    }
+                }
+                _ => depth += 1,
+            },
+            Event::End(name) => {
+                if name == "tc"
+                    && let (Some(c), Some(row)) = (cell.take(), table.rows.last_mut())
+                {
+                    row.push(c);
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(table);
+                }
+            }
+            Event::Text(_) => {}
+            Event::Eof => return Ok(table),
+        }
+    }
+}
+
 /// One shape, its start tag just read, through its end tag. A group's
 /// members are read into `children`; the slide's `spTree` is read as a
 /// group whose members are the slide's shapes. A markup compatibility
@@ -451,16 +758,7 @@ fn frame_kind(uri: &str) -> ShapeKind {
 /// choices and the fallback repeat the content for other readers
 /// (unverified on a PowerPoint-saved file; TODO.md).
 fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget) -> Result<Shape, Error> {
-    let mut shape = Shape {
-        kind,
-        id: None,
-        name: String::new(),
-        hidden: false,
-        placeholder: None,
-        media: false,
-        text: None,
-        children: Vec::new(),
-    };
+    let mut shape = Shape::new(kind);
     let mut seen_identity = false;
     let mut depth = 1usize;
     // For each open `mc:AlternateContent`, whether a choice was taken.
@@ -492,11 +790,30 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                     shape.children.push(read_shape(parser, member, budget)?);
                     continue;
                 }
-                // A table cell's text body belongs to the table (M2); only
-                // an autoshape's own body is the shape's text.
-                if e.name == "txBody" && kind == ShapeKind::Shape && shape.text.is_none() {
-                    shape.text = Some(read_text_body(parser, budget)?);
-                    continue;
+                // The shape's own parts; the same names deeper down (an OLE
+                // preview's) belong to something else.
+                match e.name.as_str() {
+                    "spPr" | "grpSpPr" if depth == 1 => {
+                        read_shape_properties(parser, &mut shape)?;
+                        continue;
+                    }
+                    "xfrm" if depth == 1 && shape.geometry.is_none() => {
+                        shape.geometry = Some(read_xfrm(parser, &e)?);
+                        continue;
+                    }
+                    "txBody" if depth == 1 && kind == ShapeKind::Shape && shape.text.is_none() => {
+                        shape.text = Some(read_text_body(parser, budget)?);
+                        continue;
+                    }
+                    "blipFill" if depth == 1 && kind == ShapeKind::Picture && shape.image.is_none() => {
+                        shape.image = read_blip_fill(parser)?;
+                        continue;
+                    }
+                    "tbl" if kind == ShapeKind::Table && shape.table.is_none() => {
+                        shape.table = Some(read_table(parser, budget)?);
+                        continue;
+                    }
+                    _ => {}
                 }
                 depth += 1;
                 match e.name.as_str() {
@@ -516,6 +833,11 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                     "graphicData" if kind == ShapeKind::OtherFrame => {
                         kind = frame_kind(e.plain_attr("uri").unwrap_or_default());
                         shape.kind = kind;
+                    }
+                    "chart" if kind == ShapeKind::Chart && shape.chart.is_none() => {
+                        if let Some(rid) = e.prefixed_attr("id") {
+                            shape.chart = Some(ChartRef { rid: rid.to_owned(), data: None });
+                        }
                     }
                     // Media hangs off a shape's `nvPr`; PowerPoint uses
                     // pictures, but the schema allows it on any shape.
@@ -541,46 +863,120 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
     }
 }
 
+/// Run properties (`a:rPr`, `a:defRPr`), its start tag just read, through
+/// its end tag: what is written, by name.
+fn read_run_format(parser: &mut Parser<'_>, e: &Element) -> Result<Format, Error> {
+    let mut format = Format::new();
+    for (attr, key) in [
+        ("b", "bold"),
+        ("i", "italic"),
+        ("u", "underline"),
+        ("strike", "strike"),
+        ("baseline", "baseline"),
+        ("cap", "caps"),
+        ("spc", "spacing"),
+    ] {
+        if let Some(v) = e.plain_attr(attr) {
+            format.insert(key, v.to_owned());
+        }
+    }
+    // `sz` is in hundredths of a point.
+    if let Some(sz) = number::<u32>(e, "sz") {
+        format.insert("size", format!("{}pt", f64::from(sz) / 100.0));
+    }
+    loop {
+        match parser.next()? {
+            Event::Start(c) => match c.name.as_str() {
+                "solidFill" | "gradFill" | "noFill" | "pattFill" => {
+                    let d = describe(parser, &c)?;
+                    format.insert("color", d);
+                }
+                "highlight" => {
+                    let d = describe(parser, &c)?;
+                    format.insert("highlight", d);
+                }
+                "latin" | "ea" | "cs" => {
+                    if let Some(face) = c.plain_attr("typeface") {
+                        let key = match c.name.as_str() {
+                            "latin" => "font",
+                            "ea" => "fontEastAsian",
+                            _ => "fontComplex",
+                        };
+                        format.insert(key, face.to_owned());
+                    }
+                    parser.skip_element()?;
+                }
+                _ => parser.skip_element()?,
+            },
+            Event::End(_) | Event::Eof => return Ok(format),
+            Event::Text(_) => {}
+        }
+    }
+}
+
 /// The paragraphs of the text body just started, through its end tag.
 /// Runs inside markup-compatibility blocks (equations) are skipped like
-/// any other unknown element: their text is not read.
+/// any other unknown element: their text is not read. The body's own list
+/// styles (`a:lstStyle`) are not read here: they are inherited formatting
+/// (M3).
 fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
     let mut paragraphs: Vec<Paragraph> = Vec::new();
-    // A field's text is the `a:t` inside its `a:fld`.
+    // A field's kind while inside its `a:fld`.
     let mut field: Option<String> = None;
+    // The current run's properties.
+    let mut format = Format::new();
     let mut depth = 1usize;
     loop {
         match parser.next()? {
             Event::Start(e) => match e.name.as_str() {
-                "AlternateContent" => parser.skip_element()?,
+                "AlternateContent" | "lstStyle" | "bodyPr" | "endParaRPr" | "defRPr" => parser.skip_element()?,
                 "p" => {
                     budget.take()?;
                     depth += 1;
-                    paragraphs.push(Paragraph { level: 0, runs: Vec::new() });
+                    paragraphs.push(Paragraph { level: 0, format: Format::new(), runs: Vec::new() });
                 }
                 "pPr" => {
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
                         p.level = number(&e, "lvl").unwrap_or(0);
+                        if let Some(a) = e.plain_attr("algn") {
+                            p.format.insert("align", a.to_owned());
+                        }
                     }
+                }
+                "buNone" | "buChar" | "buAutoNum" | "buBlip" => {
+                    depth += 1;
+                    let bullet = match e.name.as_str() {
+                        "buNone" => "none".to_owned(),
+                        "buChar" => format!("char:{}", e.plain_attr("char").unwrap_or_default()),
+                        "buAutoNum" => format!("number:{}", e.plain_attr("type").unwrap_or_default()),
+                        _ => "picture".to_owned(),
+                    };
+                    if let Some(p) = paragraphs.last_mut() {
+                        p.format.insert("bullet", bullet);
+                    }
+                }
+                "rPr" => format = read_run_format(parser, &e)?,
+                "r" => {
+                    depth += 1;
+                    format = Format::new();
                 }
                 "t" => {
                     budget.take()?;
                     let text = parser.text_until_end(&[])?;
                     let Some(p) = paragraphs.last_mut() else { continue };
-                    match &field {
-                        Some(kind) => p.runs.push(Run::Field { kind: kind.clone(), text }),
-                        None => p.runs.push(Run::Text(text)),
-                    }
+                    let kind = field.clone().map_or(RunKind::Text, RunKind::Field);
+                    p.runs.push(Run { kind, text, format: format.clone() });
                 }
                 "br" => {
                     depth += 1;
                     if let Some(p) = paragraphs.last_mut() {
-                        p.runs.push(Run::Break);
+                        p.runs.push(Run { kind: RunKind::Break, text: String::new(), format: Format::new() });
                     }
                 }
                 "fld" => {
                     depth += 1;
+                    format = Format::new();
                     field = Some(e.plain_attr("type").unwrap_or("field").to_owned());
                 }
                 _ => depth += 1,

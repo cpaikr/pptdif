@@ -151,7 +151,7 @@ fn position_alignment_pairs_slide_n_with_slide_n() {
     let mut slides = five();
     slides.insert(0, content_slide("Cover", &["Harbour project"]));
     let (a, b) = (deck(five()), deck(slides));
-    let c = diff::compare("a", &a, "b", &b, CompareOptions { align: AlignMode::Position });
+    let c = diff::compare("a", &a, "b", &b, CompareOptions { align: AlignMode::Position, ..CompareOptions::default() });
     assert!(c.slides.iter().take(5).all(|p| p.base.as_ref().unwrap().index == p.other.as_ref().unwrap().index));
     assert_eq!(c.slides.last().unwrap().status, Status::OnlyOther);
 }

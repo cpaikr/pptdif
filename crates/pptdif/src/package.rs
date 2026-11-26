@@ -141,6 +141,21 @@ impl<R: Read + Seek> Package<R> {
 
     /// The member as UTF-8 text (a leading BOM dropped), or `None` when absent.
     pub fn read_text(&mut self, name: &str) -> Result<Option<String>, Error> {
+        let Some((actual, bytes)) = self.read_member(name)? else {
+            return Ok(None);
+        };
+        decode(bytes)
+            .map(Some)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidXml, format!("{actual} is not UTF-8 or UTF-16 text")))
+    }
+
+    /// The member's bytes (an image), or `None` when absent, under the same
+    /// bounds as text.
+    pub fn read_bytes(&mut self, name: &str) -> Result<Option<Vec<u8>>, Error> {
+        Ok(self.read_member(name)?.map(|(_, bytes)| bytes))
+    }
+
+    fn read_member(&mut self, name: &str) -> Result<Option<(String, Vec<u8>)>, Error> {
         let Some(actual) = self.names.get(&name.to_ascii_lowercase()).cloned() else {
             return Ok(None);
         };
@@ -161,9 +176,7 @@ impl<R: Read + Seek> Package<R> {
             return Err(invalid(format!("the presentation decompresses to more than {max_total_bytes} bytes")));
         }
         self.read_total += len;
-        decode(bytes)
-            .map(Some)
-            .ok_or_else(|| Error::new(ErrorCode::InvalidXml, format!("{actual} is not UTF-8 or UTF-16 text")))
+        Ok(Some((actual, bytes)))
     }
 
     /// The relationships of `part` (from `<dir>/_rels/<file>.rels`), with
