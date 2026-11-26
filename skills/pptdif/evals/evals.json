@@ -1,0 +1,30 @@
+{
+  "skill_name": "pptdif",
+  "setup": "cargo run -p pptdif-fixtures --example write_demo -- demo  (writes demo/demo-v1.pptx and demo/demo-v2.pptx, every word invented)",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "demo/demo-v1.pptx 랑 demo/demo-v2.pptx 뭐가 바뀌었는지 정리해 줘.",
+      "hard_because": "Slides were reordered, removed, and added, so comparing slide n with slide n would flag almost everything; the moved note and the chart value are easy to miss among text edits.",
+      "expected_output": "Runs pptdif compare (text or JSON) and reports: the cover subtitle 'Planning team' → 'Planning and delivery teams'; on Progress, 'Deck framing started' → 'Deck framing finished' and a new bullet 'Lighting designed'; on Site notes the note moved right (x 72 → 288 pt); Budget (slide 4 → 5) Steel cost 80 → 95 in the table and the chart's Q2 spend 12 → 14; the Risks slide removed; Questions moved from slide 6 to 4; a Next steps slide added. Names base and other, quotes wording and figures from the tool."
+    },
+    {
+      "id": 2,
+      "prompt": "Did any numbers change between demo/demo-v1.pptx and demo/demo-v2.pptx?",
+      "hard_because": "The numbers sit in a table cell and in a chart's cached series, not in text boxes, and the Budget slide changed position.",
+      "expected_output": "Uses compare (optionally --kind table,chart) and reports the Steel cost 80 → 95 (table cell row 3, column 2) and the chart series Spend Q2 12 → 14 on the Budget slide (slide 4 in base, 5 in other); notes chart values are as the chart last drew them."
+    },
+    {
+      "id": 3,
+      "prompt": "Make a report my manager can open to review the differences between demo/demo-v1.pptx and demo/demo-v2.pptx.",
+      "hard_because": "The deliverable is the HTML report written to a file, not a pasted diff; it must not overwrite either deck, and --images is optional and slow.",
+      "expected_output": "Runs pptdif compare demo/demo-v1.pptx demo/demo-v2.pptx --format html -o <path>.html (beside the decks or where asked), reports the path and the headline counts from the summary envelope, does not upload anything, and mentions --images only as an option for PowerPoint-rendered slides."
+    },
+    {
+      "id": 4,
+      "prompt": "demo-v2.pptx 구조만 알려줘. 슬라이드 내용은 말하지 말고.",
+      "hard_because": "Confidential content must not be echoed.",
+      "expected_output": "Uses pptdif inspect and reports the slide count, layouts, sections, and per-slide counts of shapes, pictures, tables, and charts without quoting slide text or titles."
+    }
+  ]
+}

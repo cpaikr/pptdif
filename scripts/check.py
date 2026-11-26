@@ -252,9 +252,11 @@ def format_parity() -> None:
 
 
 def main() -> int:
-    if SKILLS.is_dir():
-        for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
-            check_skill(skill)
+    # The published skill is part of the repository; a missing one fails.
+    if not (SKILLS / "pptdif" / "SKILL.md").is_file():
+        fail("skills/pptdif/SKILL.md is missing")
+    for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()) if SKILLS.is_dir() else []:
+        check_skill(skill)
     run_cargo()
     cli_smoke()
     parity()

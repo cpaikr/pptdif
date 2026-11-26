@@ -5,8 +5,9 @@ holds what is left. Remove an item when it lands.
 
 ## Next
 
-- **M5.** The `pptdif` agent skill with evals, and a Windows x64 release
-  workflow (`v*` tags), as in xldif.
+- **First release.** The maintainer (`sjunepark`, the only actor the
+  release workflow accepts) picks the version, sets it in `Cargo.toml`, and
+  pushes its `v*` tag (AGENTS.md, Release).
 - **Report:** group members are drawn in their group's child coordinates
   (`chOff`/`chExt` are not applied), which matters only for scaled groups.
 - **Inheritance not read:** table styles, a paragraph's own `a:defRPr`,

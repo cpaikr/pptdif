@@ -6,12 +6,13 @@ matched by content, so an inserted or reordered slide is one change, not
 every slide after it. Agents read its JSON; people will read its
 side-by-side HTML report. It needs no PowerPoint.
 
-**Status:** M0 to M4 are done: `inspect`, `text`, and `compare` (JSON,
-text, and a self-contained HTML report) over slides, shapes, text, notes,
-geometry, formatting (inherited through layouts, masters, and themes, and
-checked against PowerPoint), tables, pictures, charts, comments, sections,
-layouts, masters, and themes. The agent skill and release (M5) are next.
-See [PLAN.md](PLAN.md).
+**Status:** milestones M0 to M5 are done; no release is published yet.
+`inspect`, `text`, and `compare` (JSON, text, and a self-contained HTML
+report) cover slides, shapes, text, notes, geometry, formatting (inherited
+through layouts, masters, and themes, and checked against PowerPoint),
+tables, pictures, charts, comments, sections, layouts, masters, and themes.
+The [`pptdif` agent skill](skills/pptdif/SKILL.md) teaches agents to drive
+the CLI. See [PLAN.md](PLAN.md).
 
 ## Commands
 
@@ -55,10 +56,17 @@ All accept `--format text`. Run `pptdif <command> --help` for details.
 | [crates/pptdif-cli](crates/pptdif-cli/) | The `pptdif` executable |
 | [crates/pptdif-fixtures](crates/pptdif-fixtures/) | Synthetic test decks |
 | [fixtures/powerpoint](fixtures/powerpoint/) | A deck PowerPoint saved, with invented content |
+| [skills/pptdif](skills/pptdif/SKILL.md) | The agent skill: routing, [comparing](skills/pptdif/references/comparing.md), [installation](skills/pptdif/references/installation.md) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Boundaries, invariants, and the process contract |
 | [PLAN.md](PLAN.md) | Design decisions and milestones |
 | [TODO.md](TODO.md) | Open items and facts still to verify |
 | `fixtures/private/` | Git-ignored real decks for local checks only |
+
+## Installing
+
+Download the Windows release archive (once one is published), or build from
+source on any platform; see
+[installation](skills/pptdif/references/installation.md).
 
 ## Building
 
