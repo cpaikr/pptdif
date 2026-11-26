@@ -6,7 +6,7 @@ matched by content, so an inserted or reordered slide is one change, not
 every slide after it. Agents read its JSON; people will read its
 side-by-side HTML report. It needs no PowerPoint.
 
-**Status:** milestones M0 to M5 are done; no release is published yet.
+**Status:** milestones M0 to M5 are done; v0.0.1 is the first release.
 `inspect`, `text`, and `compare` (JSON, text, and a self-contained HTML
 report) cover slides, shapes, text, notes, geometry, formatting (inherited
 through layouts, masters, and themes, and checked against PowerPoint),
@@ -66,7 +66,8 @@ All accept `--format text`. Run `pptdif <command> --help` for details.
 
 ## Installing
 
-Download the Windows release archive (once one is published), or build from
+Download the Windows archive from the
+[releases](https://github.com/cpaikr/pptdif/releases), or build from
 source on any platform; see
 [installation](skills/pptdif/references/installation.md).
 

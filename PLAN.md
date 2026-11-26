@@ -39,12 +39,11 @@ Status:
   word marks, navigation, "changes only", phone layout); `--images` has
   PowerPoint render the changed slides (one PowerPoint session for both
   decks: about 50 seconds, most of it PowerPoint starting).
-- M5 is done except publishing: the `pptdif` agent skill (`skills/pptdif`,
-  with evals on the invented demo pair) and a release workflow that builds
-  the Windows x64 archive when a `v*` tag is pushed.
-- Next action: the maintainer reviews and lands the stacked PRs (#1 to
-  #6) and decides the first release; real decks in `fixtures/private/`
-  should then check slide pairing and inheritance ([TODO.md](TODO.md)).
+- M5 is done: the `pptdif` agent skill (`skills/pptdif`, with evals on the
+  invented demo pair) and a release workflow that builds the Windows x64
+  archive when a `v*` tag is pushed. v0.0.1 is released.
+- Next action: real decks in `fixtures/private/` check slide pairing and
+  inheritance ([TODO.md](TODO.md)).
 
 ## Decisions
 
