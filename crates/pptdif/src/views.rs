@@ -69,7 +69,7 @@ fn summarize(index: usize, slide: &Slide, section: Option<&str>) -> SlideSummary
         pictures: 0,
         tables: 0,
         charts: 0,
-        notes: slide.has_notes,
+        notes: slide.notes.is_some(),
         comments: slide.comments,
     };
     for shape in slide.all_shapes() {
@@ -119,4 +119,72 @@ pub fn inspect(file: &str, deck: &Presentation) -> Inspection {
             .collect(),
         masters: deck.masters.clone(),
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ParagraphView {
+    pub level: u8,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeText {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    pub paragraphs: Vec<ParagraphView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlideText {
+    pub index: usize,
+    pub id: u32,
+    pub shapes: Vec<ShapeText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<ParagraphView>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextListing {
+    pub file: String,
+    pub slides: Vec<SlideText>,
+}
+
+fn paragraphs(ps: &[crate::model::Paragraph]) -> Vec<ParagraphView> {
+    ps.iter().map(|p| ParagraphView { level: p.level, text: p.text() }).collect()
+}
+
+/// The `text` result: every shape with text, slide by slide, and the notes.
+/// `slide` keeps only that 1-based slide.
+pub fn text(file: &str, deck: &Presentation, slide: Option<usize>) -> TextListing {
+    let slides = deck
+        .slides
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| slide.is_none_or(|n| n == i + 1))
+        .map(|(i, s)| SlideText {
+            index: i + 1,
+            id: s.id,
+            shapes: s
+                .all_shapes()
+                .filter_map(|shape| {
+                    let ps = shape.text.as_ref().filter(|ps| ps.iter().any(|p| !p.text().is_empty()))?;
+                    Some(ShapeText {
+                        id: shape.id,
+                        name: shape.name.clone(),
+                        placeholder: shape
+                            .placeholder
+                            .as_ref()
+                            .map(|p| if p.index == 0 { p.kind.clone() } else { format!("{}:{}", p.kind, p.index) }),
+                        paragraphs: paragraphs(ps),
+                    })
+                })
+                .collect(),
+            notes: s.notes.as_deref().map(paragraphs),
+        })
+        .collect();
+    TextListing { file: file.to_owned(), slides }
 }

@@ -64,6 +64,59 @@ pub struct Placeholder {
     pub index: u32,
 }
 
+/// One piece of a paragraph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Run {
+    Text(String),
+    /// `a:br`: a line break inside the paragraph.
+    Break,
+    /// `a:fld`: text PowerPoint fills in (slide number, date). `text` is
+    /// what it showed when saved; `kind` is its `type`.
+    Field {
+        kind: String,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paragraph {
+    /// Outline level, 0 for the top (`a:pPr` `lvl`).
+    pub level: u8,
+    pub runs: Vec<Run>,
+}
+
+impl Paragraph {
+    /// The text as shown: field text as saved, line breaks as `\n`.
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for run in &self.runs {
+            match run {
+                Run::Text(t) | Run::Field { text: t, .. } => out.push_str(t),
+                Run::Break => out.push('\n'),
+            }
+        }
+        out
+    }
+
+    /// The text as compared: a field by its kind, since PowerPoint rewrites
+    /// its text (renumbering every footer after an inserted slide).
+    pub fn compared(&self) -> String {
+        let mut out = String::new();
+        for run in &self.runs {
+            match run {
+                Run::Text(t) => out.push_str(t),
+                Run::Field { kind, .. } => {
+                    out.push('{');
+                    out.push_str(kind);
+                    out.push('}');
+                }
+                Run::Break => out.push('\n'),
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     pub kind: ShapeKind,
@@ -74,6 +127,8 @@ pub struct Shape {
     pub placeholder: Option<Placeholder>,
     /// A picture that plays video or audio.
     pub media: bool,
+    /// The text body of an autoshape or text box, when it has one.
+    pub text: Option<Vec<Paragraph>>,
     /// A group's members, in z-order.
     pub children: Vec<Shape>,
 }
@@ -90,7 +145,9 @@ pub struct Slide {
     pub layout: Option<Arc<str>>,
     /// Shapes in z-order (back to front).
     pub shapes: Vec<Shape>,
-    pub has_notes: bool,
+    /// The speaker notes' text (the notes page's body placeholder), when the
+    /// slide has a notes page.
+    pub notes: Option<Vec<Paragraph>>,
     /// Comments, without their replies.
     pub comments: usize,
     /// The slide carries a `<p:timing>` tree (animations).

@@ -11,7 +11,9 @@ use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::model::{DeckFormat, Master, Placeholder, Presentation, Section, Shape, ShapeKind, Size, Slide, Warning};
+use crate::model::{
+    DeckFormat, Master, Paragraph, Placeholder, Presentation, Run, Section, Shape, ShapeKind, Size, Slide, Warning,
+};
 use crate::package::{Limits, Package, Relationship};
 use crate::xml::{Element, Event, Parser};
 use crate::{Error, ErrorCode};
@@ -348,7 +350,7 @@ fn read_slide<R: Read + Seek>(
         hidden: false,
         layout: None,
         shapes: Vec::new(),
-        has_notes: false,
+        notes: None,
         comments: 0,
         animated: false,
     };
@@ -369,7 +371,13 @@ fn read_slide<R: Read + Seek>(
     for rel in rels.iter().filter(|r| !r.external) {
         match rel.kind.as_str() {
             "slideLayout" => slide.layout = layouts.get(pkg, &rel.target)?,
-            "notesSlide" => slide.has_notes = true,
+            "notesSlide" => {
+                let notes = match pkg.read_text(&rel.target)? {
+                    Some(text) => read_notes(&text, &rel.target, budget)?,
+                    None => Vec::new(),
+                };
+                slide.notes = Some(notes);
+            }
             // Legacy comment lists and modern comments both end their
             // relationship type in `comments` (modern observed, legacy
             // unverified; TODO.md).
@@ -444,6 +452,7 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
         hidden: false,
         placeholder: None,
         media: false,
+        text: None,
         children: Vec::new(),
     };
     let mut seen_identity = false;
@@ -475,6 +484,12 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                 {
                     budget.take()?;
                     shape.children.push(read_shape(parser, member, budget)?);
+                    continue;
+                }
+                // A table cell's text body belongs to the table (M2); only
+                // an autoshape's own body is the shape's text.
+                if e.name == "txBody" && kind == ShapeKind::Shape && shape.text.is_none() {
+                    shape.text = Some(read_text_body(parser, budget)?);
                     continue;
                 }
                 depth += 1;
@@ -514,6 +529,84 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
             Event::Text(_) => {}
             // The parser reports a part that ends inside an open element.
             Event::Eof => return Ok(shape),
+        }
+    }
+}
+
+/// The paragraphs of the text body just started, through its end tag.
+/// Runs inside markup-compatibility blocks (equations) are skipped like
+/// any other unknown element: their text is not read.
+fn read_text_body(parser: &mut Parser<'_>, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
+    let mut paragraphs: Vec<Paragraph> = Vec::new();
+    // A field's text is the `a:t` inside its `a:fld`.
+    let mut field: Option<String> = None;
+    let mut depth = 1usize;
+    loop {
+        match parser.next()? {
+            Event::Start(e) => match e.name.as_str() {
+                "AlternateContent" => parser.skip_element()?,
+                "p" => {
+                    budget.take()?;
+                    depth += 1;
+                    paragraphs.push(Paragraph { level: 0, runs: Vec::new() });
+                }
+                "pPr" => {
+                    depth += 1;
+                    if let Some(p) = paragraphs.last_mut() {
+                        p.level = number(&e, "lvl").unwrap_or(0);
+                    }
+                }
+                "t" => {
+                    budget.take()?;
+                    let text = parser.text_until_end(&[])?;
+                    let Some(p) = paragraphs.last_mut() else { continue };
+                    match &field {
+                        Some(kind) => p.runs.push(Run::Field { kind: kind.clone(), text }),
+                        None => p.runs.push(Run::Text(text)),
+                    }
+                }
+                "br" => {
+                    depth += 1;
+                    if let Some(p) = paragraphs.last_mut() {
+                        p.runs.push(Run::Break);
+                    }
+                }
+                "fld" => {
+                    depth += 1;
+                    field = Some(e.plain_attr("type").unwrap_or("field").to_owned());
+                }
+                _ => depth += 1,
+            },
+            Event::End(name) => {
+                if name == "fld" {
+                    field = None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(paragraphs);
+                }
+            }
+            Event::Text(_) => {}
+            Event::Eof => return Ok(paragraphs),
+        }
+    }
+}
+
+/// The notes page's text: its body placeholder's paragraphs.
+fn read_notes(text: &str, part: &str, budget: &mut Budget) -> Result<Vec<Paragraph>, Error> {
+    let mut parser = Parser::new(text, part);
+    loop {
+        match parser.next()? {
+            Event::Start(e) if e.name == "spTree" => {
+                let tree = read_shape(&mut parser, ShapeKind::Group, budget)?;
+                let body = tree
+                    .walk()
+                    .find(|s| s.placeholder.as_ref().is_some_and(|p| p.kind == "body"))
+                    .and_then(|s| s.text.clone());
+                return Ok(body.unwrap_or_default());
+            }
+            Event::Eof => return Ok(Vec::new()),
+            _ => {}
         }
     }
 }

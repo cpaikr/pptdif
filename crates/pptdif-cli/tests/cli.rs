@@ -129,6 +129,50 @@ fn inspect_text_is_one_line_per_record() {
 }
 
 #[test]
+fn compare_reports_changes_in_the_envelope() {
+    let work = Work::new();
+    let base = work.basic();
+    let edited = pptdif_fixtures::basic().slide(pptdif_fixtures::content_slide("Next steps", &["Order railings"]));
+    let other = work.file("edited.pptx", &edited.to_bytes());
+    let run = pptdif(["compare", s(&base), s(&other)]);
+    assert_eq!((run.code, run.stderr.as_str()), (0, ""));
+    let env = envelope(&run);
+    let result = &env["result"];
+    assert_eq!(result["summary"]["slidesOnlyOther"], 1);
+    assert_eq!(result["listed"], 1);
+    let change = &result["slides"][0]["changes"][0];
+    assert_eq!((change["kind"].clone(), change["status"].clone()), (Value::from("slide"), Value::from("onlyOther")));
+    assert_eq!(change["other"]["text"], "Next steps");
+
+    let text = pptdif(["compare", s(&base), s(&other), "--format", "text"]);
+    assert_eq!(text.code, 0);
+    assert!(
+        text.stdout.lines().nth(1).unwrap().starts_with("p3:slide:-:slide\tslide\tadded\tslide 3"),
+        "{}",
+        text.stdout
+    );
+
+    let same = pptdif(["compare", s(&base), s(&base)]);
+    assert_eq!(envelope(&same)["result"]["listed"], 0);
+}
+
+#[test]
+fn text_lists_paragraphs_by_shape() {
+    let work = Work::new();
+    let deck = work.basic();
+    let run = pptdif(["text", s(&deck), "--slide", "2"]);
+    assert_eq!(run.code, 0);
+    let env = envelope(&run);
+    let slides = env["result"]["slides"].as_array().unwrap();
+    assert_eq!(slides.len(), 1);
+    assert_eq!(slides[0]["shapes"][1]["paragraphs"][0]["text"], "Revenue grew");
+    assert_eq!(slides[0]["shapes"][1]["placeholder"], "body:1");
+
+    let bad = pptdif(["text", s(&deck), "--slide", "9"]);
+    assert_eq!((bad.code, envelope(&bad)["error"]["code"].clone()), (1, Value::from("invalid_argument")));
+}
+
+#[test]
 fn failures_carry_a_stable_code() {
     let work = Work::new();
     let missing = work.0.join("missing.pptx");

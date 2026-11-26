@@ -37,13 +37,38 @@ fn hidden_slides_carry_show_zero() {
 #[test]
 fn notes_comments_and_animations() {
     let deck = deck();
-    assert!(deck.slides[0].has_notes);
+    assert!(deck.slides[0].notes.is_some());
     // A modern comment: relationship type ending in `comments`
     // (office/2018/10), part `ppt/comments/modernComment_*.xml`, one
     // `p188:cm` per comment.
     assert_eq!(deck.slides.iter().map(|s| s.comments).collect::<Vec<_>>(), [0, 0, 0, 1]);
     // PowerPoint writes `<p:timing>` only on the slide with an animation.
     assert_eq!(deck.slides.iter().map(|s| s.animated).collect::<Vec<_>>(), [false, true, false, false]);
+}
+
+#[test]
+fn text_levels_and_notes() {
+    let deck = deck();
+    let body = deck.slides[1].shapes[1].text.as_ref().unwrap();
+    let paragraphs: Vec<(u8, String)> = body.iter().map(|p| (p.level, p.text())).collect();
+    // `IndentLevel = 2` is written as `lvl="1"`: levels count from 0.
+    assert_eq!(
+        paragraphs,
+        [
+            (0, "Pier foundations done".to_owned()),
+            (0, "Deck framing started".to_owned()),
+            (1, "Railings ordered".to_owned())
+        ]
+    );
+    let notes = deck.slides[0].notes.as_ref().unwrap();
+    assert_eq!(notes.iter().map(pptdif::model::Paragraph::text).collect::<Vec<_>>(), ["Open with the timeline."]);
+}
+
+#[test]
+fn the_deck_compares_equal_to_itself() {
+    let deck = deck();
+    let c = pptdif::diff::compare("a", &deck, "b", &deck, pptdif::diff::CompareOptions::default());
+    assert!(c.slides.iter().all(|p| p.changes.is_empty()));
 }
 
 #[test]
