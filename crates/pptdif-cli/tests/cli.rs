@@ -223,3 +223,29 @@ fn failures_carry_a_stable_code() {
     // Failures stay JSON even when text was asked for.
     assert_eq!(envelope(&run)["error"]["code"], "invalid_archive");
 }
+
+#[test]
+fn a_hard_link_to_a_deck_is_the_deck() {
+    let work = Work::new();
+    let base = work.basic();
+    let other = work.file("other.pptx", &pptdif_fixtures::basic().to_bytes());
+    let link = work.0.join("link.html");
+    std::fs::hard_link(&other, &link).unwrap();
+    let before = std::fs::read(&other).unwrap();
+    let run = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&link), "--force"]);
+    assert_eq!(envelope(&run)["error"]["code"], "output_exists");
+    assert_eq!(std::fs::read(&other).unwrap(), before);
+}
+
+#[test]
+fn the_report_shows_what_slide_and_kind_select() {
+    let work = Work::new();
+    let base = work.basic();
+    let edited = pptdif_fixtures::basic().slide(pptdif_fixtures::content_slide("Next steps", &["Order railings"]));
+    let other = work.file("edited.pptx", &edited.to_bytes());
+    let report = work.0.join("one.html");
+    let run = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--slide", "1"]);
+    assert_eq!(run.code, 0);
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.contains("Quarterly review") && !html.contains("Next steps"));
+}

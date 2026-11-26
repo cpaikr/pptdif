@@ -17,6 +17,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 pptdif.workspace = true
+same-file.workspace = true
 
 [lints]
 workspace = true
