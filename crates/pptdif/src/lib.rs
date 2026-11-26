@@ -6,10 +6,12 @@
 //! `ARCHITECTURE.md` for the module map and `PLAN.md` for the milestones.
 
 pub mod align;
+pub mod diff;
 mod error;
 pub mod model;
 mod package;
 pub mod reader;
+mod textdiff;
 pub mod views;
 mod xml;
 

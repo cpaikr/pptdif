@@ -18,11 +18,13 @@ Status:
 - M0 is done: the survey (below), the workspace with the copied xldif
   modules, the fixture builder, the PowerPoint-saved fixture and its
   script, python-pptx parity, `scripts/check.py`, and CI.
-- M1 has started: the reader takes slide order, sections, masters and
-  layouts, and each slide's shape tree (kinds, ids, names, placeholders,
-  groups), notes, and comments; `inspect` reports them. Parity with
-  python-pptx is clean on the public fixtures.
-- Next action: text bodies, then `text` and `compare` ([TODO.md](TODO.md)).
+- M1 is done: the reader takes slide order, sections, masters and layouts,
+  each slide's shape tree, text bodies (paragraphs, levels, runs, breaks,
+  fields), notes, and comments; `inspect`, `text`, and `compare` (slides,
+  shapes, text, notes) report them. Self-compare and swap symmetry hold as
+  properties over random decks. No private corpus exists yet, so the
+  alignment has not been reviewed on real version pairs.
+- Next action: M2 ([TODO.md](TODO.md)).
 
 ## Decisions
 

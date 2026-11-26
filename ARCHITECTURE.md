@@ -25,9 +25,14 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
     model;
   - [model.rs](crates/pptdif/src/model.rs): the immutable presentation
     model;
-  - [views.rs](crates/pptdif/src/views.rs): the `inspect` result;
+  - [views.rs](crates/pptdif/src/views.rs): the `inspect` and `text`
+    results;
   - [align.rs](crates/pptdif/src/align.rs): sequence alignment (anchors on
-    unique content, similarity in the gaps, moves), not used yet;
+    unique content, similarity in the gaps, moves), for slides and
+    paragraphs;
+  - [diff.rs](crates/pptdif/src/diff.rs): the comparison: slide pairing
+    (alignment, then order-free pairing of what is left), shape pairing,
+    paragraph changes, ids, and the `compare` listing;
   - [error.rs](crates/pptdif/src/error.rs): stable error categories.
 
   `package.rs`, `xml.rs`, `align.rs`, and `error.rs` were copied from
@@ -60,6 +65,16 @@ skills/pptdif ──(pptdif …; JSON on stdout)──► crates/pptdif-cli ─�
   preview picture) is part of that shape.
 - **No slide text in `inspect`.** Text appears only in commands that ask
   for it.
+- **Swapped files mirror.** Slides, and each slide pair, are compared in a
+  fixed orientation (by a content hash) and the result turned round when
+  that is not the order given, so `A B` reports what `B A` does with the
+  sides exchanged. Which of two crossing slide pairs counts as moved is
+  settled in that orientation too.
+- **Stable ids.** A change id is built from its slide pair and both sides'
+  shape ids and paragraph numbers, never from list order, and no two
+  changes share one.
+- **Fields are not edits.** A field compares by its kind, not the text
+  PowerPoint saved for it.
 
 ## Process contract
 
@@ -90,9 +105,15 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd` and
   saved ([`scripts/powerpoint_fixture.py`](scripts/powerpoint_fixture.py)).
   Its assertions are the file-format facts observed in PowerPoint's own
   output.
+- [`crates/pptdif/tests/compare.rs`](crates/pptdif/tests/compare.rs)
+  covers inserted, deleted, moved, and moved-and-edited slides, bullets
+  edited and added, renumbered fields, shape pairing, notes, visibility,
+  the listing, and two properties over random decks: a deck against itself
+  shows nothing, and swapping the files mirrors the result.
 - [`scripts/parity.py`](scripts/parity.py) compares each slide's id,
   layout, visibility, notes, and shape counts with python-pptx, an
   independent reader.
 - [`scripts/check.py`](scripts/check.py) runs fmt, clippy, tests, a CLI
   smoke run, and parity over the public fixtures and, when present, the
-  private corpus (counts only).
+  private corpus, plus a compare smoke run there: self-compares and
+  swapped pairs (counts only).

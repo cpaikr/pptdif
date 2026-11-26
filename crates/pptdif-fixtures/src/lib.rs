@@ -373,6 +373,47 @@ pub fn group(id: u32, name: &str, members_xml: &str) -> String {
     )
 }
 
+/// A text shape with one paragraph per entry. An entry starting with `<`
+/// is raw run XML (a field, a line break); any other is one plain run.
+pub fn paragraphs_shape(id: u32, name: &str, placeholder: Option<(&str, u32)>, paragraphs: &[&str]) -> String {
+    let ph = placeholder.map_or(String::new(), |(kind, idx)| format!(r#"<p:ph type="{kind}" idx="{idx}"/>"#));
+    let geometry = if placeholder.is_some() { "" } else { r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"# };
+    let body: String = paragraphs
+        .iter()
+        .map(|p| {
+            if p.starts_with('<') {
+                format!("<a:p>{p}</a:p>")
+            } else {
+                format!("<a:p><a:r><a:t>{}</a:t></a:r></a:p>", escape(p))
+            }
+        })
+        .collect();
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{}"/><p:cNvSpPr/><p:nvPr>{ph}</p:nvPr></p:nvSpPr><p:spPr>{geometry}</p:spPr><p:txBody><a:bodyPr/>{body}</p:txBody></p:sp>"#,
+        escape(name)
+    )
+}
+
+/// A content slide: a title and a body placeholder with these bullets,
+/// each plain text (escaped). No bullets is one empty paragraph, as
+/// PowerPoint writes an empty placeholder.
+pub fn content_slide(title: &str, bullets: &[&str]) -> RawSlide {
+    let runs: Vec<String> = if bullets.is_empty() {
+        vec!["<a:endParaRPr/>".to_owned()]
+    } else {
+        bullets.iter().map(|b| format!("<a:r><a:t>{}</a:t></a:r>", escape(b))).collect()
+    };
+    let runs: Vec<&str> = runs.iter().map(String::as_str).collect();
+    RawSlide::new(
+        1,
+        &[
+            text_shape(2, "Title 1", Some(("title", 0)), title),
+            paragraphs_shape(3, "Content Placeholder 2", Some(("body", 1)), &runs),
+        ]
+        .concat(),
+    )
+}
+
 /// The URIs PowerPoint writes in `graphicData`.
 pub mod uri {
     pub const TABLE: &str = "http://schemas.openxmlformats.org/drawingml/2006/table";

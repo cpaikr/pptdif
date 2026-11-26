@@ -147,7 +147,6 @@ impl<'a> Parser<'a> {
     /// Text up to the end of the element just started, skipping any child
     /// elements whose local name is in `skip` (with everything inside them)
     /// and collecting text from all others.
-    #[cfg_attr(not(test), expect(dead_code, reason = "paragraph text is read in M1"))]
     pub fn text_until_end(&mut self, skip: &[&str]) -> Result<String, Error> {
         let mut out = String::new();
         let mut depth = 1usize;

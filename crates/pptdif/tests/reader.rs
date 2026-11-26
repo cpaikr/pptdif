@@ -109,8 +109,8 @@ fn hidden_slides_notes_comments_and_animations() {
         .slide(RawSlide::new(1, "").hidden().comments(2).animated());
     let deck = read_bytes(deck.to_bytes()).unwrap();
     let (a, b) = (&deck.slides[0], &deck.slides[1]);
-    assert!(a.has_notes && !a.hidden && a.comments == 0 && !a.animated);
-    assert!(!b.has_notes && b.hidden && b.comments == 2 && b.animated);
+    assert!(a.notes.is_some() && !a.hidden && a.comments == 0 && !a.animated);
+    assert!(b.notes.is_none() && b.hidden && b.comments == 2 && b.animated);
     assert!(deck.warnings[0].message.contains("1 slide's animations"), "{}", deck.warnings[0].message);
 }
 

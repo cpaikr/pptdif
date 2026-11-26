@@ -155,6 +155,46 @@ def parity() -> None:
             print(f"ok   parity {label}")
 
 
+def compare_smoke() -> None:
+    """On the private corpus: every deck compared with itself shows no
+    changes, and each pair of decks in one folder compares both ways without
+    error, with the slide counts mirrored. Prints counts only."""
+    decks = private_decks()
+    if not decks:
+        return
+
+    def run(a: Path, b: Path) -> dict | None:
+        proc = subprocess.run([str(EXE), "compare", str(a), str(b), "--limit", "1"], capture_output=True)
+        try:
+            env = json.loads(proc.stdout.decode("utf-8"))
+        except ValueError:
+            return None
+        return env["result"] if env.get("ok") else None
+
+    before = len(errors)
+    differ = sum(1 for d in decks if (r := run(d, d)) is None or r["listed"] or r["summary"]["slidesChanged"])
+    if differ:
+        fail(f"compare smoke: {differ} deck(s) differ from themselves or failed")
+    by_folder: dict[Path, list[Path]] = {}
+    for d in decks:
+        by_folder.setdefault(d.parent, []).append(d)
+    pairs = [(s[i], s[i + 1]) for s in by_folder.values() for i in range(len(s) - 1)]
+    failed = asymmetric = 0
+    mirror = {"slidesOnlyBase": "slidesOnlyOther", "slidesOnlyOther": "slidesOnlyBase", "slidesMoved": "slidesMoved"}
+    for a, b in pairs:
+        ab, ba = run(a, b), run(b, a)
+        if ab is None or ba is None:
+            failed += 1
+        elif any(ab["summary"][k] != ba["summary"][v] for k, v in mirror.items()):
+            asymmetric += 1
+    if failed:
+        fail(f"compare smoke: {failed} of {len(pairs)} deck pair(s) failed to compare")
+    if asymmetric:
+        fail(f"compare smoke: {asymmetric} of {len(pairs)} deck pair(s) do not mirror when swapped")
+    if len(errors) == before:
+        print(f"ok   compare smoke ({len(decks)} self-compares, {len(pairs)} pairs)")
+
+
 def main() -> int:
     if SKILLS.is_dir():
         for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
@@ -162,6 +202,7 @@ def main() -> int:
     run_cargo()
     cli_smoke()
     parity()
+    compare_smoke()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1
