@@ -5,9 +5,12 @@
 //!
 //! An [`Item`] is one row or column: an optional label key and a sorted
 //! multiset of content tokens. Two items are the same row or column to the
-//! degree [`similarity`] says, and an alignment is the set of pairs, never
-//! crossing, with the greatest total similarity; a pair below
-//! [`MIN_SIMILARITY`] is never made. Two steps find it without comparing
+//! degree [`similarity`] says. Within each gap between anchors, the pairs
+//! chosen never cross and have the greatest total similarity; the whole
+//! alignment is that optimum given the anchors, not over every possible
+//! pairing. A pair below [`MIN_SIMILARITY`] is made only by position (an
+//! equal-sized gap under [`Options::positional_equal_gaps`], or items of one
+//! `shape` with some shared evidence). Two steps find it without comparing
 //! every item with every other:
 //!
 //! 1. **Anchors.** Items whose whole content (label and tokens) occurs
@@ -57,7 +60,8 @@
 
 use std::collections::HashMap;
 
-/// Pairs below this similarity are not considered the same row or column.
+/// Pairs below this similarity are not made by similarity; only pairing by
+/// position (see the module documentation) can make one.
 pub const MIN_SIMILARITY: f64 = 0.5;
 /// The largest region (base items × other items) step 2 takes without
 /// first looking for weaker evidence to split it.
@@ -632,10 +636,13 @@ fn find_moves(base: &[Item], other: &[Item], pairs: &[(usize, usize)]) -> Vec<(u
     }
     let signature = |item: &Item| -> Signature { (item.key.clone(), item.tokens.clone()) };
     let mut groups: HashMap<Signature, (Vec<usize>, Vec<usize>)> = HashMap::new();
-    for (i, item) in base.iter().enumerate().filter(|(i, it)| !paired_base[*i] && !it.tokens.is_empty()) {
+    // An item with neither label nor tokens says nothing about where it
+    // went; one with a label alone (a title-only slide) still does.
+    let telling = |it: &Item| it.key.is_some() || !it.tokens.is_empty();
+    for (i, item) in base.iter().enumerate().filter(|(i, it)| !paired_base[*i] && telling(it)) {
         groups.entry(signature(item)).or_default().0.push(i);
     }
-    for (j, item) in other.iter().enumerate().filter(|(j, it)| !paired_other[*j] && !it.tokens.is_empty()) {
+    for (j, item) in other.iter().enumerate().filter(|(j, it)| !paired_other[*j] && telling(it)) {
         if let Some(group) = groups.get_mut(&signature(item)) {
             group.1.push(j);
         }
@@ -889,6 +896,17 @@ mod tests {
         b.insert(3, moved);
         let al = align(&a, &b, ROWS);
         assert_eq!(al.pairs, [(0, 0), (2, 1), (3, 2)]);
+        assert_eq!(al.moves, [(1, 3)]);
+    }
+
+    #[test]
+    fn a_label_alone_still_moves() {
+        let mut a = rows(&["cash", "receivables", "inventory", "total"]);
+        a[1].tokens.clear();
+        let mut b = a.clone();
+        let moved = b.remove(1);
+        b.insert(3, moved);
+        let al = align(&a, &b, ROWS);
         assert_eq!(al.moves, [(1, 3)]);
     }
 

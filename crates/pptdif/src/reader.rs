@@ -113,6 +113,9 @@ impl Unread {
     }
 }
 
+/// The main part's content type. Only `.pptx` has been observed in a
+/// PowerPoint-saved file; the macro-enabled, template, and show types are
+/// taken from ECMA-376 and Office's registrations (unverified; TODO.md).
 fn format_of(content_type: Option<&str>) -> Result<DeckFormat, Error> {
     let format = match content_type {
         Some("application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml") => DeckFormat::Pptx,
@@ -156,7 +159,9 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
 
     let mut layouts = LayoutNames::default();
     let mut masters = Vec::new();
-    for rid in &listing.master_rids {
+    // A master listed twice is read once.
+    let mut seen_masters = HashSet::new();
+    for rid in listing.master_rids.iter().filter(|rid| seen_masters.insert(rid.as_str())) {
         let Some(rel) = rels.get(rid).filter(|r| r.kind == "slideMaster" && !r.external) else { continue };
         masters.push(read_master(pkg, &rel.target, &mut layouts, &mut budget)?);
     }
@@ -166,7 +171,6 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
     // read again, so it is refused.
     let mut seen = HashSet::new();
     for (id, rid) in &listing.slides {
-        budget.take()?;
         let rel = rels.get(rid).filter(|r| r.kind == "slide" && !r.external).ok_or_else(|| {
             Error::new(ErrorCode::InvalidXml, format!("{main}: slide {id} names no slide part ({rid})"))
         })?;
@@ -228,6 +232,7 @@ fn read_presentation_part(text: &str, part: &str, budget: &mut Budget) -> Result
                 }
                 "sldMasterId" => {
                     if let Some(rid) = e.prefixed_attr("id") {
+                        budget.take()?;
                         listing.master_rids.push(rid.to_owned());
                     }
                 }
@@ -251,6 +256,7 @@ fn read_presentation_part(text: &str, part: &str, budget: &mut Budget) -> Result
                             format!("{part}: a slide entry lacks id or r:id"),
                         ));
                     };
+                    budget.take()?;
                     listing.slides.push((id, rid.to_owned()));
                 }
                 // An empty list defines no show.
@@ -511,7 +517,9 @@ fn read_shape(parser: &mut Parser<'_>, mut kind: ShapeKind, budget: &mut Budget)
                         kind = frame_kind(e.plain_attr("uri").unwrap_or_default());
                         shape.kind = kind;
                     }
-                    "videoFile" | "audioFile" | "quickTimeFile" | "media" if kind == ShapeKind::Picture => {
+                    // Media hangs off a shape's `nvPr`; PowerPoint uses
+                    // pictures, but the schema allows it on any shape.
+                    "videoFile" | "audioFile" | "wavAudioFile" | "audioCd" | "quickTimeFile" | "media" => {
                         shape.media = true;
                     }
                     _ => {}

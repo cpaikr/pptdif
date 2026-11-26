@@ -10,9 +10,10 @@ prints slide numbers and the values that differ, never slide text). Exits
 1 when any deck disagrees or cannot be read by either side.
 
 Known, intended difference: python-pptx skips shapes inside
-`mc:AlternateContent`, which pptdif reads from the first choice. In a deck
+`mc:AlternateContent`, which pptdif reads from the first choice. On a slide
 with such blocks, differing shape counts are excused and counted; ids,
-layouts, visibility, and notes must still agree.
+layouts, visibility, and notes must still agree, and other slides' counts
+stay strict.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import zipfile
 
 from pptx import Presentation
 
@@ -75,12 +75,11 @@ def ours(exe: str, path: str) -> list[dict] | None:
     return [{k: s[k] for k in FIELDS} for s in env["result"]["slides"]]
 
 
-def has_alternate_content(path: str) -> bool:
-    with zipfile.ZipFile(path) as z:
-        return any(
-            n.startswith("ppt/slides/slide") and n.endswith(".xml") and b"AlternateContent" in z.read(n)
-            for n in z.namelist()
-        )
+def alternate_slides(path: str) -> set[int]:
+    """The 1-based show positions of slides holding markup-compatibility
+    blocks."""
+    prs = Presentation(path)
+    return {n for n, slide in enumerate(prs.slides, start=1) if b"AlternateContent" in slide.part.blob}
 
 
 def main() -> int:
@@ -104,7 +103,7 @@ def main() -> int:
             continue
         problems = []
         excused = 0
-        alternate = has_alternate_content(deck)
+        alternate = alternate_slides(deck)
         if len(mine) != len(other):
             problems.append(f"{len(mine)} slides against {len(other)}")
         for n, (a, b) in enumerate(zip(mine, other), start=1):
@@ -113,7 +112,7 @@ def main() -> int:
                     continue
                 # Markup-compatibility blocks change what each reader
                 # counts as a shape, never a slide's identity.
-                if alternate and f in COUNTS:
+                if n in alternate and f in COUNTS:
                     excused += 1
                 else:
                     problems.append(f"slide {n} {f}: {a[f]!r} against {b[f]!r}")

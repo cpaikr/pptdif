@@ -7,7 +7,6 @@ mod cli;
 mod commands;
 mod envelope;
 
-use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -20,10 +19,23 @@ use crate::envelope::{Envelope, Failure};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn write_stdout(text: &str) {
-    let mut out = std::io::stdout().lock();
-    // A closed pipe leaves nothing useful to report.
-    let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+/// Writes the one stdout document. A closed pipe is fine (the reader
+/// stopped listening); any other failure means the document was lost, which
+/// only the exit status can still say.
+fn write_stdout(text: &str) -> Result<(), ()> {
+    write_document(&mut std::io::stdout().lock(), text)
+}
+
+fn write_document(out: &mut impl std::io::Write, text: &str) -> Result<(), ()> {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(()),
+        _ => Ok(()),
+    }
+}
+
+/// The exit status, or 1 when stdout could not take the document.
+fn finish(text: &str, code: ExitCode) -> ExitCode {
+    if write_stdout(text).is_ok() { code } else { ExitCode::from(1) }
 }
 
 fn command_name(argv: &[String]) -> String {
@@ -54,58 +66,65 @@ fn guarded(run: impl FnOnce() -> Result<commands::Output, Failure>) -> Result<co
 }
 
 fn main() -> ExitCode {
-    let argv_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    // Arguments that are not valid Unicode cannot name anything this tool
-    // matches, so they are an invalid invocation rather than a panic.
-    let Some(argv) = argv_os.iter().map(|a| a.to_str().map(str::to_owned)).collect::<Option<Vec<String>>>() else {
-        let failure =
-            Failure::usage("arguments must be valid Unicode".to_owned(), "run `pptdif --help` for commands".to_owned());
-        write_stdout(&Envelope::failure("", &failure).render(false));
-        return ExitCode::from(failure.exit_code());
-    };
-    let pretty = argv.iter().any(|a| a == "--pretty");
+    // Paths stay OS strings: a deck's name need not be valid Unicode. The
+    // lossy form only names the command in messages.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let lossy: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let pretty = lossy.iter().any(|a| a == "--pretty");
     // Bare `pptdif` is exactly `pptdif --help`: the same parser renders both.
-    let parse_args = if argv.len() == 1 { vec![argv[0].clone(), "--help".to_owned()] } else { argv.clone() };
+    let parse_args = if argv.len() == 1 { vec![argv[0].clone(), "--help".into()] } else { argv.clone() };
     let cli = match Cli::try_parse_from(&parse_args) {
         Ok(cli) => cli,
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
-            write_stdout(&e.to_string());
-            return ExitCode::SUCCESS;
+            return finish(&e.to_string(), ExitCode::SUCCESS);
         }
         Err(e) => {
             let rendered = e.to_string();
             let message =
                 rendered.lines().next().unwrap_or("invalid arguments").trim_start_matches("error: ").to_owned();
-            let command = command_name(&argv);
+            let command = command_name(&lossy);
             let hint = if command.is_empty() || e.kind() == ErrorKind::InvalidSubcommand {
                 "run `pptdif --help` for commands".to_owned()
             } else {
                 format!("run `pptdif {command} --help` for options and examples")
             };
             let failure = Failure::usage(message, hint);
-            write_stdout(&Envelope::failure(&command, &failure).render(pretty));
-            return ExitCode::from(failure.exit_code());
+            return finish(&Envelope::failure(&command, &failure).render(pretty), ExitCode::from(failure.exit_code()));
         }
     };
     let name = cli.command.name();
     match guarded(|| commands::run(cli.command)) {
-        Ok(commands::Output::Text(text)) => {
-            write_stdout(&text);
-            ExitCode::SUCCESS
-        }
+        Ok(commands::Output::Text(text)) => finish(&text, ExitCode::SUCCESS),
         Ok(commands::Output::Json { result, warnings }) => {
-            write_stdout(&Envelope::success(name, result, &warnings).render(cli.pretty));
-            ExitCode::SUCCESS
+            finish(&Envelope::success(name, result, &warnings).render(cli.pretty), ExitCode::SUCCESS)
         }
         Err(failure) => {
-            write_stdout(&Envelope::failure(name, &failure).render(cli.pretty));
-            ExitCode::from(failure.exit_code())
+            finish(&Envelope::failure(name, &failure).render(cli.pretty), ExitCode::from(failure.exit_code()))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A stdout that fails every write with `kind`.
+    struct Failing(std::io::ErrorKind);
+
+    impl std::io::Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_closed_pipe_is_fine_and_other_write_failures_are_not() {
+        assert_eq!(super::write_document(&mut Failing(std::io::ErrorKind::BrokenPipe), "{}\n"), Ok(()));
+        assert_eq!(super::write_document(&mut Failing(std::io::ErrorKind::StorageFull), "{}\n"), Err(()));
+        assert_eq!(super::write_document(&mut Vec::new(), "{}\n"), Ok(()));
+    }
+
     #[test]
     fn a_panic_becomes_an_internal_error() {
         let failure = super::guarded(|| panic!("boom")).err().expect("a failure");

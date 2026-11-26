@@ -92,8 +92,11 @@ fn check_magic(head: &[u8]) -> Result<(), Error> {
 
 impl Package<File> {
     pub fn open(path: &Path, limits: &Limits) -> Result<Self, Error> {
-        let meta = std::fs::metadata(path).map_err(|_| {
-            Error::new(ErrorCode::FileNotFound, format!("{} does not exist or is not readable", path.display()))
+        let meta = std::fs::metadata(path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                Error::new(ErrorCode::FileNotFound, format!("{} does not exist", path.display()))
+            }
+            _ => Error::new(ErrorCode::IoError, format!("reading {}: {e}", path.display())),
         })?;
         if !meta.is_file() {
             return Err(Error::new(ErrorCode::FileNotFound, format!("{} is not a file", path.display())));
@@ -146,7 +149,7 @@ impl<R: Read + Seek> Package<R> {
         let mut member = self.archive.by_name(&actual).map_err(|e| invalid(format!("{actual}: {e}")))?;
         let mut bytes = Vec::new();
         (&mut member)
-            .take(room + 1)
+            .take(room.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| invalid(format!("{actual} cannot be decompressed: {e}")))?;
         drop(member);
@@ -158,12 +161,9 @@ impl<R: Read + Seek> Package<R> {
             return Err(invalid(format!("the presentation decompresses to more than {max_total_bytes} bytes")));
         }
         self.read_total += len;
-        let mut text = String::from_utf8(bytes)
-            .map_err(|_| Error::new(ErrorCode::InvalidXml, format!("{actual} is not UTF-8 text")))?;
-        if text.starts_with('\u{feff}') {
-            text.drain(..'\u{feff}'.len_utf8());
-        }
-        Ok(Some(text))
+        decode(bytes)
+            .map(Some)
+            .ok_or_else(|| Error::new(ErrorCode::InvalidXml, format!("{actual} is not UTF-8 or UTF-16 text")))
     }
 
     /// The relationships of `part` (from `<dir>/_rels/<file>.rels`), with
@@ -206,11 +206,14 @@ impl<R: Read + Seek> Package<R> {
         let ext = part.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
         let mut parser = Parser::new(&text, "[Content_Types].xml");
         let mut by_default = None;
+        let mut overridden = None;
+        // Read to the end, so a truncated part fails rather than answering
+        // from its first half.
         loop {
             match parser.next()? {
                 Event::Start(e) if e.name == "Override" => {
-                    if e.attr("PartName").is_some_and(|p| p.eq_ignore_ascii_case(&wanted)) {
-                        return Ok(e.attr("ContentType").map(str::to_owned));
+                    if overridden.is_none() && e.attr("PartName").is_some_and(|p| p.eq_ignore_ascii_case(&wanted)) {
+                        overridden = Some(e.attr("ContentType").map(str::to_owned));
                     }
                 }
                 Event::Start(e) if e.name == "Default" => {
@@ -218,9 +221,32 @@ impl<R: Read + Seek> Package<R> {
                         by_default = e.attr("ContentType").map(str::to_owned);
                     }
                 }
-                Event::Eof => return Ok(by_default),
+                Event::Eof => return Ok(overridden.unwrap_or(by_default)),
                 _ => {}
             }
+        }
+    }
+}
+
+/// A part's text: UTF-8 (a leading BOM dropped), or UTF-16 when a BOM says
+/// so, which XML allows and some writers use. `None` for malformed text.
+fn decode(bytes: Vec<u8>) -> Option<String> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        if !rest.len().is_multiple_of(2) {
+            return None;
+        }
+        let units: Vec<u16> = rest.chunks_exact(2).map(|c| unit([c[0], c[1]])).collect();
+        String::from_utf16(&units).ok()
+    };
+    match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => {
+            let mut text = String::from_utf8(bytes).ok()?;
+            if text.starts_with('\u{feff}') {
+                text.drain(..'\u{feff}'.len_utf8());
+            }
+            Some(text)
         }
     }
 }
@@ -258,6 +284,47 @@ mod tests {
         assert_eq!(resolve("ppt/slides", "../slideLayouts/slideLayout2.xml"), "ppt/slideLayouts/slideLayout2.xml");
         assert_eq!(resolve("ppt", "/ppt/theme/theme1.xml"), "ppt/theme/theme1.xml");
         assert_eq!(resolve("", "ppt/presentation.xml"), "ppt/presentation.xml");
+    }
+
+    #[test]
+    fn parts_may_be_utf16() {
+        let le: Vec<u8> =
+            [0xFF, 0xFE].into_iter().chain("<a>é</a>".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> =
+            [0xFE, 0xFF].into_iter().chain("<a>é</a>".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(super::decode(le).as_deref(), Some("<a>é</a>"));
+        assert_eq!(super::decode(be).as_deref(), Some("<a>é</a>"));
+        assert_eq!(super::decode(vec![0xFF, 0xFE, 0x41]), None);
+        assert_eq!(super::decode(b"\xEF\xBB\xBF<a/>".to_vec()).as_deref(), Some("<a/>"));
+        assert_eq!(super::decode(vec![0xC3]), None);
+    }
+
+    fn zipped(members: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, text) in members {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_truncated_content_types_part_fails_even_after_a_match() {
+        let types = r#"<Types><Override PartName="/ppt/presentation.xml" ContentType="x"/><Default"#;
+        let mut pkg = Package::from_bytes(zipped(&[("[Content_Types].xml", types)]), &Limits::default()).unwrap();
+        let err = pkg.content_type("ppt/presentation.xml").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidXml);
+        let whole = r#"<Types><Override PartName="/ppt/presentation.xml" ContentType="x"/></Types>"#;
+        let mut pkg = Package::from_bytes(zipped(&[("[Content_Types].xml", whole)]), &Limits::default()).unwrap();
+        assert_eq!(pkg.content_type("ppt/presentation.xml").unwrap().as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn the_largest_byte_limits_do_not_overflow() {
+        let limits = Limits { max_member_bytes: u64::MAX, max_total_bytes: u64::MAX, ..Limits::default() };
+        let mut pkg = Package::from_bytes(zipped(&[("a.xml", "<a/>")]), &limits).unwrap();
+        assert_eq!(pkg.read_text("a.xml").unwrap().as_deref(), Some("<a/>"));
     }
 
     #[test]
