@@ -85,3 +85,26 @@ fn a_deck_against_itself_reports_no_changes() {
     assert!(!html.contains("class=\"change "));
     assert!(html.contains("pair same"));
 }
+
+#[test]
+fn group_members_are_placed_through_their_group() {
+    // A group at x = 2 in, 4 in wide, whose child frame is 0..2 in: a member
+    // at child x = 1 in lands at slide x = 4 in (one third of 12 in).
+    let member = placed_box(5, "Member", "m", (INCH, 0, INCH, INCH), "");
+    let group = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9" name="Pair"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="{}" y="0"/><a:ext cx="{}" cy="{INCH}"/><a:chOff x="0" y="0"/><a:chExt cx="{}" cy="{INCH}"/></a:xfrm></p:grpSpPr>{member}</p:grpSp>"#,
+        2 * INCH,
+        4 * INCH,
+        2 * INCH
+    );
+    let d = deck(vec![RawSlide::new(1, &group)]);
+    let c = diff::compare("a.pptx", &d, "a.pptx", &d, CompareOptions::default());
+    let html = render(&c, &d, &d, &Report::default());
+    // The slide is 13.333 in wide: 4 in is 30%.
+    assert!(html.contains(r#"title="Member""#));
+    assert!(
+        html.contains("left:30.000%"),
+        "{}",
+        &html[html.find("Member").unwrap() - 200..html.find("Member").unwrap()]
+    );
+}

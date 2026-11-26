@@ -25,8 +25,12 @@ from pathlib import Path
 ALIGN = {1: "l", 2: "ctr", 3: "r", 4: "just", 5: "dist"}
 
 
-def ours(exe: str, deck: str) -> tuple[dict, dict]:
-    proc = subprocess.run([exe, deck], capture_output=True, check=True)
+def ours(exe: str, deck: str) -> tuple[dict, dict] | None:
+    """pptdif's records, or None when it could not read the deck (its
+    messages may quote the deck, so they are not printed)."""
+    proc = subprocess.run([exe, deck], capture_output=True)
+    if proc.returncode != 0:
+        return None
     geometry: dict = {}
     paragraphs: dict = defaultdict(list)
     for line in proc.stdout.decode("utf-8").splitlines():
@@ -40,12 +44,16 @@ def ours(exe: str, deck: str) -> tuple[dict, dict]:
 
 
 def walk(shapes):
+    """Every shape, group members at any depth included."""
     for i in range(1, shapes.Count + 1):
-        shape = shapes.Item(i)
-        yield shape
-        if shape.Type == 6:  # msoGroup
-            for k in range(1, shape.GroupItems.Count + 1):
-                yield shape.GroupItems.Item(k)
+        yield from walk_shape(shapes.Item(i))
+
+
+def walk_shape(shape):
+    yield shape
+    if shape.Type == 6:  # msoGroup
+        for k in range(1, shape.GroupItems.Count + 1):
+            yield from walk_shape(shape.GroupItems.Item(k))
 
 
 def main() -> int:
@@ -56,16 +64,25 @@ def main() -> int:
     args = [a for a in args if a != "--show"]
     exe, decks = args[0], args[1:]
     app = win32.DispatchEx("PowerPoint.Application")
-    compared = differ = 0
+    compared = differ = missing = unreadable = 0
     try:
         for deck in decks:
-            geometry, paragraphs = ours(exe, deck)
+            records = ours(exe, deck)
+            if records is None:
+                unreadable += 1
+                continue
+            geometry, paragraphs = records
             pres = app.Presentations.Open(str(Path(deck).resolve()), ReadOnly=True, Untitled=False, WithWindow=False)
             try:
                 for s in range(1, pres.Slides.Count + 1):
                     for shape in walk(pres.Slides(s).Shapes):
                         key = (s, shape.Id)
-                        if key in geometry:
+                        if key not in geometry:
+                            # pptdif placed every shape PowerPoint has.
+                            missing += 1
+                            if show:
+                                print(f"slide {s} shape {shape.Id}: no geometry from pptdif")
+                        else:
                             mine = geometry[key]
                             theirs = (shape.Left, shape.Top, shape.Width, shape.Height)
                             for name, a, b in zip(("left", "top", "width", "height"), mine, theirs):
@@ -78,11 +95,19 @@ def main() -> int:
                             continue
                         text = shape.TextFrame.TextRange
                         for p in range(1, text.Paragraphs().Count + 1):
+                            para = text.Paragraphs(p)
+                            if not para.Text.strip():
+                                continue
                             runs = paragraphs.get((s, shape.Id, p), [])
-                            if not runs or len({(r["size"], r["bold"], r["font"]) for r in runs}) != 1:
+                            if not runs:
+                                missing += 1
+                                if show:
+                                    print(f"slide {s} shape {shape.Id} paragraph {p}: no runs from pptdif")
+                                continue
+                            # Mixed formatting within a paragraph is not compared.
+                            if len({(r["size"], r["bold"], r["font"]) for r in runs}) != 1:
                                 continue
                             r = runs[0]
-                            para = text.Paragraphs(p)
                             mine = {
                                 "size": float((r["size"] or "18pt").removesuffix("pt")),
                                 "bold": r["bold"] in ("1", "true"),
@@ -98,7 +123,13 @@ def main() -> int:
                                 theirs["font"] = str(para.Font.Name)
                             for name in mine:
                                 compared += 1
-                                if mine[name] != theirs[name]:
+                                # PowerPoint reports sizes as floats.
+                                same = (
+                                    abs(mine[name] - theirs[name]) <= 0.005
+                                    if name == "size"
+                                    else mine[name] == theirs[name]
+                                )
+                                if not same:
                                     differ += 1
                                     if show:
                                         print(f"slide {s} shape {shape.Id} paragraph {p} {name}: "
@@ -108,8 +139,8 @@ def main() -> int:
     finally:
         if app.Presentations.Count == 0:
             app.Quit()
-    print(f"{compared} properties compared, {differ} differ")
-    return 1 if differ else 0
+    print(f"{compared} properties compared, {differ} differ, {missing} missing, {unreadable} decks unreadable")
+    return 1 if differ or missing or unreadable else 0
 
 
 if __name__ == "__main__":

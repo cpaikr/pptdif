@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::diff::{Change, Comparison, ObjectChange, SlidePair, Status};
-use crate::model::{Presentation, Shape, ShapeKind, Size, Slide};
+use crate::model::{Geometry, Presentation, Shape, ShapeKind, Size, Slide};
 use crate::textdiff::Marks;
 
 /// Slide images by 1-based slide position, as `data:` URIs.
@@ -83,12 +83,6 @@ const fn status_word(status: Status) -> &'static str {
     }
 }
 
-/// The slide's shapes as the comparison numbers them: every shape but
-/// groups, depth first.
-fn leaves(slide: &Slide) -> Vec<&Shape> {
-    slide.all_shapes().filter(|s| s.kind != ShapeKind::Group).collect()
-}
-
 fn shape_text(shape: &Shape) -> String {
     let mut text: Vec<String> = shape.text.iter().flatten().map(crate::model::Paragraph::text).collect();
     if let Some(table) = &shape.table {
@@ -108,8 +102,75 @@ fn shape_text(shape: &Shape) -> String {
     }
 }
 
-/// One side's slide: shapes placed by their effective geometry, outlined
-/// by the status of the change on them.
+/// A shape as drawn: its rectangle on the slide (EMU) and rotation, once
+/// every group around it has mapped its child frame onto the slide.
+#[derive(Clone, Copy)]
+struct Placed {
+    x: f64,
+    y: f64,
+    cx: f64,
+    cy: f64,
+    degrees: f64,
+}
+
+/// Maps a group's child coordinates onto the slide.
+#[derive(Clone, Copy)]
+struct Frame {
+    ox: f64,
+    oy: f64,
+    sx: f64,
+    sy: f64,
+    chx: f64,
+    chy: f64,
+}
+
+const IDENTITY: Frame = Frame { ox: 0.0, oy: 0.0, sx: 1.0, sy: 1.0, chx: 0.0, chy: 0.0 };
+
+fn place(g: &Geometry, f: Frame) -> Placed {
+    Placed {
+        x: f.ox + (g.x as f64 - f.chx) * f.sx,
+        y: f.oy + (g.y as f64 - f.chy) * f.sy,
+        cx: g.cx as f64 * f.sx,
+        cy: g.cy as f64 * f.sy,
+        degrees: g.rotation as f64 / 60_000.0,
+    }
+}
+
+/// Every shape in drawing order (depth first, groups before their
+/// members), each with where it lands; members are counted as the
+/// comparison counts leaves.
+fn placed(slide: &Slide) -> Vec<(&Shape, Option<Placed>)> {
+    fn walk<'a>(shapes: &'a [Shape], frame: Frame, out: &mut Vec<(&'a Shape, Option<Placed>)>) {
+        for shape in shapes {
+            let at = shape.effective_geometry.or(shape.geometry).map(|g| place(&g, frame));
+            out.push((shape, at));
+            if shape.kind == ShapeKind::Group {
+                let inner = match (shape.effective_geometry.or(shape.geometry), at) {
+                    (Some(g), Some(p)) => {
+                        let (chx, chy, chcx, chcy) = g.child.unwrap_or((g.x, g.y, g.cx, g.cy));
+                        let scale = |to: f64, from: i64| if from > 0 { to / from as f64 } else { 1.0 };
+                        Frame {
+                            ox: p.x,
+                            oy: p.y,
+                            sx: scale(p.cx, chcx),
+                            sy: scale(p.cy, chcy),
+                            chx: chx as f64,
+                            chy: chy as f64,
+                        }
+                    }
+                    _ => frame,
+                };
+                walk(&shape.children, inner, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&slide.shapes, IDENTITY, &mut out);
+    out
+}
+
+/// One side's slide: shapes placed by their effective geometry through
+/// their groups, outlined by the status of the change on them.
 fn slide_box(
     out: &mut String,
     slide: Option<(&Slide, usize)>,
@@ -131,36 +192,52 @@ fn slide_box(
     };
     let background = image.map_or(String::new(), |uri| format!(";background-image:url('{uri}')"));
     let _ = write!(out, r#"<div class="{class}" style="aspect-ratio:{ratio}{background}">"#);
-    let pct = |v: i64, of: i64| v as f64 * 100.0 / of.max(1) as f64;
+    let (w, h) = (size.cx.max(1) as f64, size.cy.max(1) as f64);
     // Shapes with no position written or inherited are listed under the
     // slide instead, so a change on them still shows.
     let mut unplaced = String::new();
-    for (k, shape) in leaves(slide).into_iter().enumerate() {
-        let Some(g) = shape.effective_geometry.or(shape.geometry) else {
-            let (status, id) = marks.get(&(k + 1)).map_or(("", ""), |(s, id)| (status_word(*s), id.as_str()));
-            let target = if id.is_empty() { String::new() } else { format!(r#" data-change="{}""#, esc(id)) };
-            let _ = write!(
-                unplaced,
-                r#"<span class="shape unplaced {status}" title="{}"{target}>{}</span>"#,
-                esc(&shape.name),
-                esc(&shape_text(shape))
-            );
+    let mut leaf = 0usize;
+    for (shape, at) in placed(slide) {
+        let key = if shape.kind == ShapeKind::Group {
+            Mark::Group(shape.id)
+        } else {
+            leaf += 1;
+            Mark::Leaf(leaf)
+        };
+        let (status, id) = marks.get(&key).map_or(("", ""), |(s, id)| (status_word(*s), id.as_str()));
+        let target = if id.is_empty() {
+            String::new()
+        } else {
+            format!(r#" data-change="{}" tabindex="0" role="button""#, esc(id))
+        };
+        let Some(p) = at else {
+            if shape.kind != ShapeKind::Group {
+                let _ = write!(
+                    unplaced,
+                    r#"<span class="shape unplaced {status}" title="{}"{target}>{}</span>"#,
+                    esc(&shape.name),
+                    esc(&shape_text(shape))
+                );
+            }
             continue;
         };
-        let (status, id) = marks.get(&(k + 1)).map_or(("", ""), |(s, id)| (status_word(*s), id.as_str()));
-        let style = format!(
+        let mut style = format!(
             "left:{:.3}%;top:{:.3}%;width:{:.3}%;height:{:.3}%",
-            pct(g.x, size.cx),
-            pct(g.y, size.cy),
-            pct(g.cx, size.cx),
-            pct(g.cy, size.cy)
+            p.x * 100.0 / w,
+            p.y * 100.0 / h,
+            p.cx * 100.0 / w,
+            p.cy * 100.0 / h
         );
-        let text = if image.is_some() { String::new() } else { esc(&shape_text(shape)) };
-        let target = if id.is_empty() { String::new() } else { format!(r#" data-change="{}""#, esc(id)) };
+        if p.degrees != 0.0 {
+            let _ = write!(style, ";transform:rotate({:.2}deg)", p.degrees);
+        }
+        let group = shape.kind == ShapeKind::Group;
+        let text = if image.is_some() || group { String::new() } else { esc(&shape_text(shape)) };
         let _ = write!(
             out,
-            r#"<div class="shape {status} k-{:?}" style="{style}" title="{}"{target}>{text}</div>"#,
+            r#"<div class="shape {status} k-{:?}{}" style="{style}" title="{}"{target}>{text}</div>"#,
             shape.kind,
+            if group { " group" } else { "" },
             esc(&shape.name)
         );
     }
@@ -171,9 +248,16 @@ fn slide_box(
     }
 }
 
-/// Shape positions (1-based, as the comparison numbers them) with the
-/// status and id of the first change on them.
-type ShapeMarks = HashMap<usize, (Status, String)>;
+/// Which drawn shape a change sits on: a leaf by its position (1-based, as
+/// the comparison numbers them), a group by its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Mark {
+    Leaf(usize),
+    Group(Option<u32>),
+}
+
+/// Drawn shapes with the status and id of the first change on them.
+type ShapeMarks = HashMap<Mark, (Status, String)>;
 
 /// The shape positions each side's changes sit on, with the first change's
 /// status and id.
@@ -181,8 +265,10 @@ fn shape_marks(pair: &SlidePair) -> (ShapeMarks, ShapeMarks) {
     let (mut a, mut b) = (HashMap::new(), HashMap::new());
     for c in &pair.changes {
         for (side, map) in [(&c.base, &mut a), (&c.other, &mut b)] {
-            if let Some(pos) = side.as_ref().and_then(|s| s.shape.as_ref()).map(|s| s.position).filter(|p| *p > 0) {
-                map.entry(pos).or_insert((c.status, c.id.clone()));
+            // Group changes carry position 0 and the group's id.
+            if let Some(shape) = side.as_ref().and_then(|s| s.shape.as_ref()) {
+                let key = if shape.position == 0 { Mark::Group(shape.id) } else { Mark::Leaf(shape.position) };
+                map.entry(key).or_insert((c.status, c.id.clone()));
             }
         }
     }
@@ -287,7 +373,7 @@ const STYLE: &str = r"
 header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px}
 h1{font-size:16px;margin:0 0 6px}.chips span{display:inline-block;margin:0 6px 4px 0;padding:1px 8px;border:1px solid var(--line);border-radius:10px;color:var(--muted)}
 .warn{color:var(--changed);font-size:13px;margin:4px 0 0}.tools{margin-top:6px}.tools button,.tools label{margin-right:10px;font:inherit}
-main{display:flex}nav{width:240px;flex:none;border-right:1px solid var(--line);padding:8px;position:sticky;top:96px;max-height:calc(100vh - 96px);overflow:auto}
+main{display:flex}nav{width:240px;flex:none;border-right:1px solid var(--line);padding:8px;position:sticky;top:var(--head,96px);max-height:calc(100vh - var(--head,96px));overflow:auto}
 nav a{display:block;padding:2px 6px;color:var(--fg);text-decoration:none;border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 nav a.changed{border-color:var(--changed)}nav a.added{border-color:var(--added)}nav a.removed{border-color:var(--removed)}nav a.moved{border-color:var(--moved)}nav a .n{color:var(--muted)}
 #pairs{flex:1;min-width:0;padding:12px 16px}section.pair{margin-bottom:28px}section.pair h2{font-size:14px;margin:0 0 6px}
@@ -300,6 +386,8 @@ nav a.changed{border-color:var(--changed)}nav a.added{border-color:var(--added)}
 .shape.changed{border:2px solid var(--changed);background:rgba(199,119,0,.08);cursor:pointer}.shape.added{border:2px solid var(--added);background:rgba(29,127,58,.08);cursor:pointer}
 .shape.removed{border:2px solid var(--removed);background:rgba(192,38,45,.08);cursor:pointer}.shape.moved{border:2px solid var(--moved);cursor:pointer}
 .unplaced-list{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}.shape.unplaced{position:static;display:inline-block;max-width:100%;font-size:12px;color:var(--fg);border-color:var(--line)}
+.shape.group{border:1px dotted transparent;background:none;pointer-events:none}.shape.group.changed,.shape.group.moved{pointer-events:auto}
+section.pair,.change{scroll-margin-top:var(--head,140px)}body.only-changes nav a.same{display:none}
 .changes{margin-top:8px}.change{border:1px solid var(--line);border-left:4px solid var(--line);padding:6px 8px;margin:6px 0;background:var(--panel)}
 .change.changed{border-left-color:var(--changed)}.change.added{border-left-color:var(--added)}.change.removed{border-left-color:var(--removed)}.change.moved{border-left-color:var(--moved)}
 .change.current{outline:2px solid var(--fg)}.head .kind{font-weight:600;margin-right:8px}.head .status{color:var(--muted)}
@@ -313,14 +401,18 @@ body.only-changes section.pair.same{display:none}
 const SCRIPT: &str = r"
 (function(){
 var changes=[].slice.call(document.querySelectorAll('.change')),at=-1;
+function head(){document.documentElement.style.setProperty('--head',document.querySelector('header').offsetHeight+'px');}
+head();window.addEventListener('resize',head);
 function go(d){var shown=changes.filter(function(c){return c.offsetParent!==null});if(!shown.length)return;
-at=(at+d+shown.length)%shown.length;changes.forEach(function(c){c.classList.remove('current')});
-var c=shown[at];c.classList.add('current');c.scrollIntoView({block:'center'});}
+var cur=shown.indexOf(changes[at]);at=cur<0?(d>0?0:shown.length-1):(cur+d+shown.length)%shown.length;at=changes.indexOf(shown[at]);changes.forEach(function(c){c.classList.remove('current')});
+var c=changes[at];c.classList.add('current');c.scrollIntoView({block:'center'});}
 document.getElementById('next').onclick=function(){go(1)};document.getElementById('prev').onclick=function(){go(-1)};
 document.getElementById('only').onchange=function(e){document.body.classList.toggle('only-changes',e.target.checked)};
-document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT')return;
+document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT'||e.ctrlKey||e.metaKey||e.altKey)return;
 if(e.key==='n'||e.key==='j')go(1);if(e.key==='p'||e.key==='k')go(-1);});
-document.querySelectorAll('.shape[data-change]').forEach(function(s){s.onclick=function(){
+document.querySelectorAll('.shape[data-change]').forEach(function(s){
+s.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();s.onclick();}};
+s.onclick=function(){
 var c=document.getElementById(s.getAttribute('data-change'));if(c){changes.forEach(function(x){x.classList.remove('current')});
 c.classList.add('current');at=changes.indexOf(c);c.scrollIntoView({block:'center'});}}});
 })();

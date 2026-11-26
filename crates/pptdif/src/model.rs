@@ -63,6 +63,9 @@ pub struct Placeholder {
     pub kind: String,
     /// `idx`, defaulting to 0.
     pub index: u32,
+    /// `idx` was written (an explicit 0 matches the layout's index 0).
+    #[serde(skip)]
+    pub explicit_index: bool,
 }
 
 /// Formatting as written, by property name (`bold`, `size`, `color`, ...),
@@ -150,6 +153,9 @@ pub struct Geometry {
     pub rotation: i64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// A group's child frame (`chOff`, `chExt`): the coordinates its
+    /// members' geometry is written in, mapped onto `x, y, cx, cy`.
+    pub child: Option<(i64, i64, i64, i64)>,
 }
 
 /// A picture's image.

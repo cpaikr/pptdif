@@ -24,6 +24,7 @@ const WIDTH: i64 = 1280;
 // the time (45 seconds cold, observed 2026-11-26), so it is paid once.
 const SCRIPT: &str = r"
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $app = New-Object -ComObject PowerPoint.Application
 try {
   foreach ($k in 1, 2) {
@@ -71,13 +72,26 @@ struct Job {
     height: i64,
 }
 
+/// A path as COM takes it: `canonicalize` gives `\\?\C:\...` and
+/// `\\?\UNC\server\share\...`, which PowerPoint refuses.
+fn com_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
+    }
+}
+
 fn job(deck: &Path, presentation: &Presentation, slides: Vec<usize>) -> Result<Job, String> {
-    let deck = std::fs::canonicalize(deck).map_err(|e| format!("cannot resolve {}: {e}", deck.display()))?;
-    // `canonicalize` gives a `\\?\` path on Windows, which COM refuses.
-    let deck = deck.display().to_string();
-    let deck = deck.strip_prefix(r"\\?\").unwrap_or(&deck).to_owned();
+    // PowerPoint opens a copy: the deck itself may be open in PowerPoint,
+    // and closing it there would close the user's window.
+    let out = scratch()?;
+    let copy = out.0.join("deck.pptx");
+    std::fs::copy(deck, &copy).map_err(|e| format!("cannot copy {}: {e}", deck.display()))?;
+    let copy = std::fs::canonicalize(&copy).map_err(|e| format!("cannot resolve the copy: {e}"))?;
     let size = presentation.slide_size.unwrap_or(pptdif::model::Size { cx: 12_192_000, cy: 6_858_000 });
-    Ok(Job { deck, slides, out: scratch()?, width: WIDTH, height: (WIDTH * size.cy / size.cx.max(1)).max(1) })
+    Ok(Job { deck: com_path(&copy), slides, out, width: WIDTH, height: (WIDTH * size.cy / size.cx.max(1)).max(1) })
 }
 
 /// Runs PowerPoint once over both jobs; the images as `data:` URIs.
@@ -96,7 +110,7 @@ fn export(jobs: [&Job; 2]) -> Result<[HashMap<usize, String>; 2], String> {
             .env(format!("PPTDIF_WIDTH{k}"), job.width.to_string())
             .env(format!("PPTDIF_HEIGHT{k}"), job.height.to_string());
     }
-    let run = command.output().map_err(|e| format!("cannot start PowerShell: {e}"))?;
+    let run = run_with_timeout(command)?;
     if !run.status.success() {
         let why = String::from_utf8_lossy(&run.stderr);
         let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("no reason given");
@@ -134,4 +148,44 @@ pub fn slide_images(
     let (ja, jb) = (job(base, a, wanted_a)?, job(other, b, wanted_b)?);
     let [base, other] = export([&ja, &jb])?;
     Ok(Images { base, other })
+}
+
+/// PowerPoint is given this long; a modal dialog would otherwise hold the
+/// command for ever.
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn run_with_timeout(mut command: Command) -> Result<std::process::Output, String> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start PowerShell: {e}"))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|e| format!("PowerShell failed: {e}")),
+            Ok(None) if start.elapsed() > TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "PowerPoint did not finish within {} seconds (a dialog may be open in PowerPoint)",
+                    TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            Err(e) => return Err(format!("PowerShell failed: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn com_paths_keep_drive_and_share_roots() {
+        let p = |s: &str| super::com_path(std::path::Path::new(s));
+        assert_eq!(p(r"\\?\C:\decks\a.pptx"), r"C:\decks\a.pptx");
+        assert_eq!(p(r"\\?\UNC\server\share\a.pptx"), r"\\server\share\a.pptx");
+        assert_eq!(p(r"C:\decks\a.pptx"), r"C:\decks\a.pptx");
+    }
 }

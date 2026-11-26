@@ -40,7 +40,9 @@ the CLI. See [PLAN.md](PLAN.md).
   geometry show the values in effect, inherited through the layout,
   master, theme, and default style; a slide reports them only where it
   writes something different, and a changed layout, master, or theme is
-  one change under `objects`.
+  one change under `objects`. A slide that moves to another layout reports
+  what it now inherits as well. Table styles, a paragraph's own `a:defRPr`,
+  and fills and lines a shape inherits are not read (see [TODO.md](TODO.md)).
   `--format html -o FILE` writes a self-contained report: each slide pair
   side by side with changed shapes outlined, the changes listed under it
   with changed words marked, and next and previous navigation. Slides are

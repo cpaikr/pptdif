@@ -123,7 +123,20 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     let pairs: Vec<(String, String)> =
                         warnings.iter().map(|w| (w.code.clone(), w.message.clone())).collect();
                     let report = pptdif::html::Report { warnings: &pairs, images: rendered.as_ref() };
-                    Output::Text(pptdif::html::render(&comparison, &a, &b, &report))
+                    // The report shows what --slide and --kind select, and
+                    // every such change whatever --limit says.
+                    let shown = diff::listing(
+                        &comparison,
+                        &Filter { slide, kinds: filter.kinds.clone(), limit: 0, all: filter.kinds.is_empty() },
+                    );
+                    let selected = pptdif::diff::Comparison {
+                        base: comparison.base.clone(),
+                        other: comparison.other.clone(),
+                        slides: shown.slides,
+                        objects: shown.objects,
+                        fell_back: comparison.fell_back,
+                    };
+                    Output::Text(pptdif::html::render(&selected, &a, &b, &report))
                 }
             };
             let Some(path) = output else { return Ok(document) };
@@ -135,9 +148,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     (text, warnings)
                 }
             };
-            std::fs::write(&path, text).map_err(|e| {
-                Failure::from(Error::new(ErrorCode::IoError, format!("writing {}: {e}", path.display())))
-            })?;
+            write_output(&path, &text, force, &[&base, &other])?;
             let result = serde_json::json!({
                 "output": path.display().to_string(),
                 "summary": listing.summary,
@@ -149,13 +160,11 @@ pub fn run(command: Command) -> Result<Output, Failure> {
 }
 
 /// An output path must not be a compared deck (even with `--force`) and
-/// must not exist unless `--force` says to replace it.
+/// must not exist unless `--force` says to replace it. "The same deck" is
+/// the same file, by identity: a symbolic or hard link to a deck is the
+/// deck.
 fn check_output(path: &Path, inputs: &[&std::path::PathBuf], force: bool) -> Result<(), Failure> {
-    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    };
-    if inputs.iter().any(|i| same(path, i)) {
+    if inputs.iter().any(|i| same_file::is_same_file(path, i).unwrap_or(false)) {
         return Err(Error::new(ErrorCode::OutputExists, format!("{} is a compared deck", path.display()))
             .with_hint("choose another output file; a compared deck is never replaced")
             .into());
@@ -381,4 +390,28 @@ fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+/// Writes the document: without `--force` the file must not exist (checked
+/// as it is created, so nothing created meanwhile is replaced); with it,
+/// the file is replaced, after making sure once more it is not a deck.
+fn write_output(path: &Path, text: &str, force: bool, inputs: &[&std::path::PathBuf]) -> Result<(), Failure> {
+    use std::io::Write as _;
+    let io =
+        |e: std::io::Error| Failure::from(Error::new(ErrorCode::IoError, format!("writing {}: {e}", path.display())));
+    if force {
+        check_output(path, inputs, true)?;
+        return std::fs::write(path, text).map_err(io);
+    }
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Failure::from(
+                Error::new(ErrorCode::OutputExists, format!("{} already exists", path.display()))
+                    .with_hint("pass --force to replace it"),
+            )
+        } else {
+            io(e)
+        }
+    })?;
+    file.write_all(text.as_bytes()).map_err(io)
 }
