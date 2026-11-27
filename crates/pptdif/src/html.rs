@@ -395,6 +395,7 @@ section.pair,.change{scroll-margin-top:var(--head,140px)}body.only-changes nav a
 mark{background:var(--mark);color:inherit}.absent{color:var(--muted)}table.props{border-collapse:collapse;margin-top:4px;font-size:12px;width:100%}
 table.props td,table.props th{border:1px solid var(--line);padding:2px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 body.only-changes section.pair.same{display:none}
+section.pair.same{margin-bottom:6px}section.pair.same>details>summary{cursor:pointer;color:var(--muted)}section.pair.same>details>summary h2{display:inline;font-weight:normal}section.pair.same>details[open]{margin-bottom:22px}
 @media (max-width:760px){main{display:block}nav{position:static;width:auto;max-height:none;border-right:0;border-bottom:1px solid var(--line)}.panes,.sides{grid-template-columns:minmax(0,1fr)}#pairs{padding:12px}header{padding:10px 12px}}
 ";
 
@@ -408,6 +409,12 @@ var cur=shown.indexOf(changes[at]);at=cur<0?(d>0?0:shown.length-1):(cur+d+shown.
 var c=changes[at];c.classList.add('current');c.scrollIntoView({block:'center'});}
 document.getElementById('next').onclick=function(){go(1)};document.getElementById('prev').onclick=function(){go(-1)};
 document.getElementById('only').onchange=function(e){document.body.classList.toggle('only-changes',e.target.checked)};
+var folds=[].slice.call(document.querySelectorAll('section.pair.same>details'));
+function reveal(id){var s=document.getElementById(id),d=s&&s.querySelector(':scope>details');if(d)d.open=true;}
+function fromHash(){if(location.hash)reveal(decodeURIComponent(location.hash.slice(1)));}
+fromHash();window.addEventListener('hashchange',fromHash);
+document.querySelectorAll('nav a').forEach(function(a){a.addEventListener('click',function(){reveal(a.getAttribute('href').slice(1))})});
+document.getElementById('expand').onchange=function(e){folds.forEach(function(d){d.open=e.target.checked})};
 document.addEventListener('keydown',function(e){if(e.target.tagName==='INPUT'||e.ctrlKey||e.metaKey||e.altKey)return;
 if(e.key==='n'||e.key==='j')go(1);if(e.key==='p'||e.key==='k')go(-1);});
 document.querySelectorAll('.shape[data-change]').forEach(function(s){
@@ -444,7 +451,7 @@ pub fn render(comparison: &Comparison, base: &Presentation, other: &Presentation
     for (code, message) in report.warnings {
         let _ = write!(out, r#"<div class="warn">{}: {}</div>"#, esc(code), esc(message));
     }
-    out.push_str(r#"<div class="tools"><button id="prev">◀ previous (P)</button><button id="next">next (N) ▶</button><label><input type="checkbox" id="only"> changes only</label></div></header><main><nav>"#);
+    out.push_str(r#"<div class="tools"><button id="prev">◀ previous (P)</button><button id="next">next (N) ▶</button><label><input type="checkbox" id="only"> changes only</label><label><input type="checkbox" id="expand"> expand unchanged</label></div></header><main><nav>"#);
     for pair in &comparison.slides {
         let _ = write!(
             out,
@@ -465,13 +472,18 @@ pub fn render(comparison: &Comparison, base: &Presentation, other: &Presentation
     out.push_str(r#"</nav><div id="pairs">"#);
     for pair in &comparison.slides {
         let (ma, mb) = shape_marks(pair);
+        // An unchanged slide starts collapsed to its heading, so the changed
+        // slides are not lost among full-size copies of identical ones.
+        let collapsed = pair.status == Status::Same;
         let _ = write!(
             out,
-            r#"<section class="pair {}" id="{}"><h2>{} · {}</h2><div class="panes">"#,
+            r#"<section class="pair {}" id="{}">{}<h2>{} · {}</h2>{}<div class="panes">"#,
             status_word(pair.status),
             esc(&pair.id),
+            if collapsed { "<details><summary>" } else { "" },
             esc(&pair_title(pair)),
-            status_word(pair.status)
+            status_word(pair.status),
+            if collapsed { "</summary>" } else { "" }
         );
         for (label, deck, r, marks, images) in [
             (&comparison.base.file, base, &pair.base, &ma, report.images.map(|i| &i.base)),
@@ -492,7 +504,7 @@ pub fn render(comparison: &Comparison, base: &Presentation, other: &Presentation
         for c in &pair.changes {
             change_row(&mut out, c);
         }
-        out.push_str("</div></section>");
+        out.push_str(if collapsed { "</div></details></section>" } else { "</div></section>" });
     }
     if !comparison.objects.is_empty() {
         out.push_str(r#"<section class="pair changed" id="objects"><h2>Deck · sections, layouts, masters, themes</h2><div class="changes">"#);

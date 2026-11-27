@@ -240,7 +240,9 @@ the same error codes, with `powerpoint_failed` in place of `excel_failed`.
   that scroll together.
 - **Slides:** each pane shows its slides in aligned order; an inserted or
   deleted slide has a hatched placeholder opposite it, and moved slides
-  are marked.
+  are marked. An unchanged slide starts collapsed to its heading
+  (`<details>`); it opens on click, when the slide list jumps to it, or
+  with the "expand unchanged" toggle.
 - **With PowerPoint:** changed slides are exported as images and changed
   shapes are outlined over them, placed from their geometry scaled by the
   slide size. Outlines need the resolved geometry: inherited placeholder

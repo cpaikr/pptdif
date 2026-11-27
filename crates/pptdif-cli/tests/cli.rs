@@ -210,6 +210,28 @@ fn the_html_report_goes_to_a_file_and_never_over_a_deck() {
 }
 
 #[test]
+fn the_html_report_collapses_unchanged_slides() {
+    let work = Work::new();
+    let base = work.basic();
+    let edited = pptdif_fixtures::basic().slide(pptdif_fixtures::content_slide("Next steps", &["Order railings"]));
+    let other = work.file("edited.pptx", &edited.to_bytes());
+    let report = work.0.join("report.html");
+    let run = pptdif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]);
+    assert_eq!(run.code, 0);
+    let html = std::fs::read_to_string(&report).unwrap();
+
+    // Every unchanged slide is a closed <details>; the added slide stays open.
+    let sections: Vec<&str> = html.split("<section class=\"pair ").skip(1).collect();
+    let same: Vec<&&str> = sections.iter().filter(|s| s.starts_with("same\"")).collect();
+    assert!(!same.is_empty());
+    assert!(same.iter().all(|s| s.contains("\"><details><summary><h2>") && s.contains("</details></section>")));
+    assert!(!html.contains("<details open"));
+    let added = sections.iter().find(|s| s.contains("Next steps")).unwrap();
+    assert!(added.starts_with("added\"") && !added.contains("<details>"));
+    assert!(html.contains(r#"id="expand""#));
+}
+
+#[test]
 fn failures_carry_a_stable_code() {
     let work = Work::new();
     let missing = work.0.join("missing.pptx");
