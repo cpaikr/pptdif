@@ -369,7 +369,7 @@ fn pair_title(pair: &SlidePair) -> String {
 const STYLE: &str = r"
 :root{--bg:#fff;--fg:#1d2330;--muted:#5d6676;--line:#d7dce4;--panel:#f5f7fa;--changed:#c77700;--added:#1d7f3a;--removed:#c0262d;--moved:#5b4ccf;--mark:#ffe08a}
 @media (prefers-color-scheme:dark){:root{--bg:#14171c;--fg:#e3e7ee;--muted:#98a2b3;--line:#323a46;--panel:#1c2027;--mark:#7a5d00}}
-*{box-sizing:border-box}html,body{overflow-x:hidden}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+*{box-sizing:border-box}html,body{overflow-x:clip}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
 header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px}
 h1{font-size:16px;margin:0 0 6px}.chips span{display:inline-block;margin:0 6px 4px 0;padding:1px 8px;border:1px solid var(--line);border-radius:10px;color:var(--muted)}
 .warn{color:var(--changed);font-size:13px;margin:4px 0 0}.tools{margin-top:6px}.tools button,.tools label{margin-right:10px;font:inherit}
@@ -529,6 +529,19 @@ mod tests {
         assert_eq!(super::base64(b"f"), "Zg==");
         assert_eq!(super::base64(b"fo"), "Zm8=");
         assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// `overflow-x: hidden` (or `auto`/`scroll`) on `html` or `body` makes
+    /// `body` a scroll container, so the sticky header and sidebar stick to
+    /// a box that never scrolls and leave the screen. `clip` hides the
+    /// overflow without creating a scroll container.
+    #[test]
+    fn page_overflow_keeps_header_and_nav_sticky() {
+        let rule = super::STYLE.split('}').find(|r| r.trim_start().starts_with("html,body{")).expect("html,body rule");
+        assert!(rule.contains("overflow-x:clip"), "{rule}");
+        assert!(!["hidden", "auto", "scroll"].iter().any(|v| rule.contains(&format!("overflow-x:{v}"))), "{rule}");
+        assert!(super::STYLE.contains("header{position:sticky"));
+        assert!(super::STYLE.contains("position:sticky;top:var(--head"));
     }
 
     #[test]
