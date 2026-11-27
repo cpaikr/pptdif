@@ -395,6 +395,7 @@ section.pair,.change{scroll-margin-top:var(--head,140px)}body.only-changes nav a
 mark{background:var(--mark);color:inherit}.absent{color:var(--muted)}table.props{border-collapse:collapse;margin-top:4px;font-size:12px;width:100%}
 table.props td,table.props th{border:1px solid var(--line);padding:2px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 body.only-changes section.pair.same{display:none}
+nav details.run>summary{padding:2px 6px;color:var(--muted);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}nav details.run a{padding-left:18px}body.only-changes nav details.run{display:none}
 section.pair.same{margin-bottom:6px}section.pair.same>details>summary{cursor:pointer;color:var(--muted)}section.pair.same>details>summary h2{display:inline;font-weight:normal}section.pair.same>details[open]{margin-bottom:22px}
 @media (max-width:760px){main{display:block}nav{position:static;width:auto;max-height:none;border-right:0;border-bottom:1px solid var(--line)}.panes,.sides{grid-template-columns:minmax(0,1fr)}#pairs{padding:12px}header{padding:10px 12px}}
 ";
@@ -409,8 +410,9 @@ var cur=shown.indexOf(changes[at]);at=cur<0?(d>0?0:shown.length-1):(cur+d+shown.
 var c=changes[at];c.classList.add('current');c.scrollIntoView({block:'center'});}
 document.getElementById('next').onclick=function(){go(1)};document.getElementById('prev').onclick=function(){go(-1)};
 document.getElementById('only').onchange=function(e){document.body.classList.toggle('only-changes',e.target.checked)};
-var folds=[].slice.call(document.querySelectorAll('section.pair.same>details'));
-function reveal(id){var s=document.getElementById(id),d=s&&s.querySelector(':scope>details');if(d)d.open=true;}
+var folds=[].slice.call(document.querySelectorAll('section.pair.same>details,nav details.run'));
+function reveal(id){var s=document.getElementById(id),d=s&&s.querySelector(':scope>details');if(d)d.open=true;
+[].forEach.call(document.querySelectorAll('nav details.run a'),function(a){if(a.getAttribute('href')==='#'+id)a.parentNode.open=true;});}
 function fromHash(){if(location.hash)reveal(decodeURIComponent(location.hash.slice(1)));}
 fromHash();window.addEventListener('hashchange',fromHash);
 document.querySelectorAll('nav a').forEach(function(a){a.addEventListener('click',function(){reveal(a.getAttribute('href').slice(1))})});
@@ -452,15 +454,33 @@ pub fn render(comparison: &Comparison, base: &Presentation, other: &Presentation
         let _ = write!(out, r#"<div class="warn">{}: {}</div>"#, esc(code), esc(message));
     }
     out.push_str(r#"<div class="tools"><button id="prev">◀ previous (P)</button><button id="next">next (N) ▶</button><label><input type="checkbox" id="only"> changes only</label><label><input type="checkbox" id="expand"> expand unchanged</label></div></header><main><nav>"#);
-    for pair in &comparison.slides {
-        let _ = write!(
-            out,
-            r##"<a href="#{}" class="{}">{} <span class="n">{}</span></a>"##,
-            esc(&pair.id),
-            status_word(pair.status),
-            esc(&pair_title(pair)),
-            if pair.changes.is_empty() { String::new() } else { format!("({})", pair.changes.len()) }
-        );
+    // A run of two or more unchanged slides folds into one entry, as the
+    // slides themselves do, so the list leads with what changed.
+    for run in comparison.slides.chunk_by(|a, b| a.status == Status::Same && b.status == Status::Same) {
+        let folded = run.len() > 1 && run[0].status == Status::Same;
+        if folded {
+            let at = |p: &SlidePair| pair_title(p).split(' ').take(3).collect::<Vec<_>>().join(" ");
+            let _ = write!(
+                out,
+                r#"<details class="run"><summary>{} unchanged <span class="n">{} … {}</span></summary>"#,
+                run.len(),
+                esc(&at(&run[0])),
+                esc(&at(&run[run.len() - 1]))
+            );
+        }
+        for pair in run {
+            let _ = write!(
+                out,
+                r##"<a href="#{}" class="{}">{} <span class="n">{}</span></a>"##,
+                esc(&pair.id),
+                status_word(pair.status),
+                esc(&pair_title(pair)),
+                if pair.changes.is_empty() { String::new() } else { format!("({})", pair.changes.len()) }
+            );
+        }
+        if folded {
+            out.push_str("</details>");
+        }
     }
     if !comparison.objects.is_empty() {
         let _ = write!(

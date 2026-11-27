@@ -229,6 +229,15 @@ fn the_html_report_collapses_unchanged_slides() {
     let added = sections.iter().find(|s| s.contains("Next steps")).unwrap();
     assert!(added.starts_with("added\"") && !added.contains("<details>"));
     assert!(html.contains(r#"id="expand""#));
+
+    // The slide list folds the run of unchanged slides into one closed entry
+    // and keeps the added slide outside it.
+    let nav = &html[html.find("<nav>").unwrap()..html.find("</nav>").unwrap()];
+    let run = &nav[nav.find(r#"<details class="run">"#).expect("folded run")..];
+    let run = &run[..run.find("</details>").unwrap()];
+    assert!(run.contains(&format!("<summary>{} unchanged ", same.len())));
+    assert_eq!(run.matches(r#"class="same""#).count(), same.len());
+    assert!(!run.contains("Next steps") && nav.contains("Next steps"));
 }
 
 #[test]
